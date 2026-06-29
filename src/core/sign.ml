@@ -32,7 +32,10 @@ type t =
   ; sign_deps     : dep_data Path.Map.t ref
   ; sign_builtins : sym StrMap.t ref
   ; sign_ind      : ind_data SymMap.t ref
-  ; sign_cp_pos   : cp_pos list SymMap.t ref }
+  ; sign_cp_pos   : cp_pos list SymMap.t ref
+  ; sign_constraints : constr_rule list ref
+  (** Typed constraints (the [when] construct), stored as a flat list: a
+      constraint belongs to no particular symbol. *) }
 
 (** [mem sign name] checks whether a symbol named [name] exists in [sign]. *)
 let mem : t -> string -> bool = fun sign name ->
@@ -67,7 +70,8 @@ module Ghost = struct
     ; sign_deps = ref Path.Map.empty
     ; sign_builtins = ref StrMap.empty
     ; sign_ind = ref SymMap.empty
-    ; sign_cp_pos = ref SymMap.empty }
+    ; sign_cp_pos = ref SymMap.empty
+    ; sign_constraints = ref [] }
 
   let _ = loaded := Path.Map.add path sign !loaded
 
@@ -87,7 +91,8 @@ let create : Path.t -> t = fun sign_path ->
   ; sign_deps
   ; sign_builtins = ref StrMap.empty
   ; sign_ind = ref SymMap.empty
-  ; sign_cp_pos = ref SymMap.empty }
+  ; sign_cp_pos = ref SymMap.empty
+  ; sign_constraints = ref [] }
 
 (** [loading] contains the modules that are being processed. They are stored
    in a stack due to dependencies. Note that the topmost element corresponds
@@ -363,6 +368,10 @@ let add_rules : t -> sym -> rule list -> unit = fun sign s rs ->
     sign.sign_deps := Path.Map.add s.sym_path d !(sign.sign_deps)
    end ;
   if Stdlib.(!Common.Console.lsp_mod) then Stdlib.(!add_rules_callback s rs)
+
+
+let add_type_constrains : t -> constr_rule -> unit = fun sign cr ->
+  sign.sign_constraints := !(sign.sign_constraints) @ [cr]
 
 (** [add_rule sign s r] adds the new rule [r] to the symbol [s]. When the rule
     does not correspond to a symbol of signature [sign], it is stored in its

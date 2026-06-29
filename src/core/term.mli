@@ -138,6 +138,17 @@ and sym =
 
 (** {3 Representation of rewriting rules} *)
 
+(** Representation of a typed constraint — the [when] construct.  See the
+    implementation (term.ml) for the full description. *)
+and constr_rule =
+  { cr_name    : string (** The [when <name> …] label (not a symbol). *)
+  ; cr_type    : term (** Guard: the type pattern of the subject. *)
+  ; cr_eqns    : (term * term) list (** Equations to merge. *)
+  ; cr_subj    : int (** Index of the subject pattern variable. *)
+  ; cr_names   : string array (** Names of the pattern variables. *)
+  ; cr_vars_nb : int (** Number of pattern variables. *)
+  ; cr_pos     : Pos.popt (** Source position. *) }
+
 (** Representation of a rewriting rule. A rewriting rule is mainly formed of a
     LHS (left hand side),  which is the pattern that should be matched for the
     rule to apply, and a RHS (right hand side) giving the action to perform if
@@ -458,6 +469,7 @@ type sym_rule = sym * rule
 
 val lhs : sym_rule -> term
 val rhs : sym_rule -> term
+
 
 (** Basic printing function (for debug). *)
 module Raw : sig
