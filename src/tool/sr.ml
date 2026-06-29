@@ -257,3 +257,58 @@ let check_rule : Pos.popt -> sym_rule -> sym_rule =
        explicited." sym_rule sr term lhs_with_metas term rhs_with_metas n
 
 let check_rule p r = print_implicits_and_domains_in (check_rule p) r
+
+(** [check_constraint pos cr] checks the typed constraint [cr] (the [when]
+    construct): the guard type must be typable, and every equation [l ≡ r] must
+    be type-correct — both sides typable and of the SAME type — under a context
+    where the pattern variables are fresh metavariables.  This is the
+    constraint analogue of {!val:check_rule}, but a constraint is a set of
+    equations to merge rather than an oriented rule, so the check is "both sides
+    of each equation agree in type" instead of "RHS has the LHS type".
+    Returns [cr] unchanged; raises [Fatal] on error.
+
+    LIMITATIONS (first version):
+      - pattern-variable arities are assumed 0 ([constr_rule] does not yet store
+        arities; the cubical [when]s use only nullary pattern variables);
+      - the subject ([cr_subj]) is not yet explicitly constrained to have type
+        [cr_type] (it is constrained only through its uses in the equations);
+      - the elaborated equations are not written back into [cr]. *)
+let check_constraint : Pos.popt -> constr_rule -> constr_rule =
+  fun pos ({cr_type; cr_eqns; cr_vars_nb; _} as cr) ->
+  LibMeta.reset_meta_counter();
+  let p = new_problem() in
+  (* One metavariable per pattern variable (arity 0, see LIMITATIONS). *)
+  let metas =
+    Array.init cr_vars_nb (fun _ -> LibMeta.fresh p (build_meta_type p 0) 0) in
+  (* Replace each (nullary) Patt by its metavariable. `subst_patt` expects an
+     mbinder per pattern variable, so we wrap with a 0-ary `bind_mvar`; with
+     higher-arity pattern variables this would be `λ x0…xₙ. ?M[x0…xₙ]` (cf.
+     check_rule), but `when` pattern variables are nullary here. *)
+  let su = Array.map (fun m -> Some (bind_mvar [||] (mk_Meta (m, [||])))) metas in
+  let ty = subst_patt su cr_type in
+  let eqns =
+    List.map (fun (l,r) -> (subst_patt su l, subst_patt su r)) cr_eqns in
+  (* The guard type must itself be typable. *)
+  (match Infer.infer_noexn p [] ty with
+   | None -> fatal pos "The guard type of a `when` constraint is not typable."
+   | Some _ -> ());
+  (* Each equation: infer the type of the left side, then CHECK the right side
+     against it — so both sides must share a type. *)
+  List.iter
+    (fun (l, r) ->
+       match Infer.infer_noexn p [] l with
+       | None -> fatal pos "An equation of a `when` constraint is not typable."
+       | Some (_, tl) ->
+         match Infer.check_noexn p [] r tl with
+         | None ->
+           fatal pos "The two sides of a `when` equation have different types."
+         | Some _ -> ())
+    eqns;
+  (* The equation constraints must be FULLY solved: `solve_noexn` can return
+     [true] yet leave unsatisfiable goals in [p.unsolved] (e.g. `I ≡ τ A`), so we
+     also require [!p.unsolved = []]. The pattern-variable metas themselves stay
+     free, so we do NOT require [!p.metas] empty. *)
+  if not (Unif.solve_noexn p) || !p.unsolved <> [] then
+    fatal pos "A `when` constraint is not type-correct \
+               (the two sides of an equation do not have the same type).";
+  cr

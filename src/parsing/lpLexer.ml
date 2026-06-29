@@ -135,6 +135,7 @@ type token =
   | UID_PATT of string
   | QID of Path.t (* in reverse order *)
   | QID_EXPL of Path.t (* in reverse order *)
+  | WHEN
 
 (** Some regexp definitions. *)
 let space = [%sedlex.regexp? Chars " \t\n\r"]
@@ -269,6 +270,7 @@ let rec token lb =
   | "verbose" -> VERBOSE
   | "why3" -> WHY3
   | "with" -> WITH
+  | "when" -> WHEN
 
   (* other tokens *)
   | '+', Plus lowercase -> DEBUG_FLAGS(true, remove_first lb)

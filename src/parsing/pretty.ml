@@ -403,6 +403,9 @@ let command : p_command pp = fun ppf { elt; _ } ->
   | P_unif_rule ur -> out ppf "unif_rule %a" unif_rule ur
   | P_coercion c -> out ppf "%a" (rule "coerce_rule") c
   | P_opaque qid -> out ppf "opaque %a" qident qid
+  | P_when (h, (s, ty), eqs) ->
+    let eqn ppf (t, u) = out ppf "@ ⊢ %a ≡ %a" term t term u in
+    out ppf "@[when %a %a :@ %a%a@]" qident h term s term ty (List.pp eqn "") eqs
   end;
   out ppf ";"
 

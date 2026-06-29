@@ -5,7 +5,470 @@ open Common open Error open Debug
 open Term
 open Print
 
-(** The head-structure of a term t is:
+(* >> Short answer: NO graph/e-graph and NO saturation. The current engine is a
+   classic Dedukti-style term rewriter — tree terms + decision-tree matching +
+   a stack machine — with only a lazy-sharing optimisation that is *not* a
+   congruence structure. Details:
+
+   TERMS (Term.term, term.ml:116) are a plain inductive TREE: Vari, Type, Kind,
+   Symb, Prod, Abst, Appl, LLet, Meta, Patt, Wild, Plac, TRef. Binders are HOAS
+   (bind_var/unbind). The ONLY mutable/graph-ish node is
+       TRef of term option Timed.ref            (term.ml:132)
+   used purely for call-by-need SHARING: whnf wraps every argument with `to_tref`
+   (eval.ml:195, `mk_TRef(Timed.ref(Some t))`) so a redex argument is reduced at
+   most once and the result is shared in place; the `steps` counter (eval.ml:47)
+   preserves physical equality. That makes a term a mutable DAG *during one
+   normalisation*, but there are NO equivalence classes, NO union-find, NO
+   congruence closure, and nothing is ever "saturated" — each query renormalises.
+
+   REWRITING is decision-tree matching, not graph search: `dtree = rule
+   Tree_type.dtree` (term.ml:164), one Maranget-style trie per symbol
+   (`sym_dtree`, term.ml:179), consulted by the stack machine `whnf_stk cfg t stk`
+   with `stack = term list` (eval.ml:212): β = `subst f u`, δ = unfold defs,
+   rules = walk the dtree. Pattern vars are `Patt(i,n,ts)` (term.ml:126).
+
+   CONVERSION (`eq_modulo`, eval.ml:125) is normalise-head-and-compare over a
+   WORKLIST of pairs `(term*term) list`: unfold (δ via the config, see below) +
+   whnf each side, compare heads, push child pairs. Again — syntactic comparison
+   up to reduction, NOT congruence closure; no saturation, no shared e-classes.
+
+   CONTEXT is two representations:
+     • typing context `ctxt = (var * term * term option) list` (var, type,
+       optional definition) — a linear assoc list; `type_of`/`def_of`
+       (ctxt.ml:10,15) are `List.find`. `Ctxt.unfold` (ctxt.ml:38) rewrites a
+       `Vari x` to its context definition.
+     • inside eval, the config precomputes `varmap = Ctxt.to_map context :
+       term VarMap.t` (eval.ml:106, ctxt.ml:61) so δ-unfolding of defined/let
+       variables during conversion is a map lookup.
+
+   RELEVANCE TO THE THESIS: the e-graph + CC(X) saturation and the ambient face
+   context Φ_Γ from proposal.md/sketch.lp are exactly the machinery that does NOT
+   exist here yet. Adding `theory`/`when` means layering an equivalence-class
+   structure (egglog-style) and a threaded conversion-time context on top of —
+   or beside — this `eq_modulo`/`whnf` pair, which today is purely
+   normalise-and-compare. *)
+
+(* >> Right — and that simplicity is the whole design bet of Dedukti/λΠ-modulo:
+   the kernel stays a tiny trusted core (whnf + eq_modulo, a few hundred lines),
+   and ALL the theory-specific power is pushed OUT into user rewrite rules, which
+   the decision-tree compiler turns into fast matching. Untyped, orientation-based
+   conversion is what keeps it this small. That's exactly why it's a good host
+   for your thesis AND why the extension is delicate: every bit of cleverness you
+   add (congruence/e-graph saturation, type-directed `when` guards, an ambient
+   Φ_Γ) moves complexity INTO the trusted core, so each addition has to re-earn
+   the three properties this simple loop currently gets for free — soundness,
+   termination/decidability, and being a congruence. Keep the diff to this file
+   minimal and auditable; that's the metric. *)
+
+
+(* >> Careful — it's the opposite of where you'd want the analogy. Lean DOES have
+   congruence closure, but NOT in its trusted kernel / definitional equality. Two
+   different layers:
+     • Kernel (trusted) `isDefEq`: whnf + structural compare, lazy δ-unfolding,
+       η, proof irrelevance — the SAME family as lambdapi's `eq_modulo` here. No
+       congruence closure, no e-graph, no saturation. Deliberately tiny/trusted.
+     • Tactic/elaborator (UNtrusted): the `cc` tactic, and Lean 4's `grind`
+       (CC + e-matching + theory combination, SMT-flavoured), and `simp`. These
+       run congruence closure to BUILD AN EXPLICIT PROOF TERM of a *propositional*
+       equality `a = b` (`Eq`), which the kernel then re-checks by ordinary defeq.
+       The CC algorithm itself is never trusted — only its output proof is.
+   So CC in Lean operates on PROPOSITIONAL `=` and is kernel-checked; it is not in
+   conversion (`≡`). (Cf. Selsam & de Moura, "Congruence Closure in Intensional
+   Type Theory", IJCAR 2016 — and note they had to use heterogeneous equality to
+   even state congruence in DTT; that subtlety is exactly why CC stays at the
+   proof layer there.)
+   THE DISTINCTION THAT MATTERS FOR THE THESIS: your proposal puts the decision
+   procedure INTO conversion — definitional, no proof term, decided by the kernel.
+   That is strictly more dangerous than Lean's choice (you must keep the kernel
+   sound AND conversion decidable), and it's also the novelty. The right prior art
+   to compare against is therefore NOT Lean but CoqMT / Coq-Modulo-Theory (Strub;
+   Blanqui–Jouannaud–Strub, "CC(X)") which genuinely embeds a theory into Coq's
+   conversion — that is the line you're extending, with cubical as the stressor. *)
+
+
+(* >> Yes. The discipline is: keep the trusted core change as SMALL as possible,
+   and only pay for the expensive bits where a rule actually forces you to. Three
+   moves, in order of how much they cost the kernel:
+
+   1. CLASSIFY the `when`s — most don't need new machinery.
+      • Orientable + type-free head (β is already a rewrite; the path BOUNDARY
+        `p @ i0 ≡ u` can be a directed rule keyed on the head `papp`) → compile
+        straight to the EXISTING dtree rewrite engine. ZERO core change.
+      • Non-orientable / saturating (path-η, primPOr overlap-agreement) → these are
+        the only ones that genuinely need an equivalence (egglog) structure.
+      So "what we can reduce": push everything orientable down to rewrite rules;
+      reserve the new conversion machinery for the handful that truly can't orient.
+      That shrinks the dangerous surface to the overlap-agreement fragment — which
+      is also the one open question (sketch.lp §7c), so nothing is wasted.
+
+   2. THEORY = a local canonizer HOOK, not a global e-graph (yet). Register
+      `theory Interval/Face` as: "when `eq_modulo` is about to compare two terms
+      whose type is a registered carrier (I, F), instead of structural compare,
+      canonize both via `can`/`canF` and decide with `eqDnf`." That's an extra
+      branch in ONE place (the head-compare in eq_modulo), decidable per call, no
+      saturation, no shared classes. Get Interval/Face De Morgan working this way
+      first; defer the actual e-graph to step 3.
+
+   3. TYPE CONSTRAINTS — this is the real fork, and it's unavoidable: today
+      `eq_modulo` is UNTYPED (it takes terms, never types). A guard `when p :
+      Path T u v` needs `p`'s type at conversion time. Two ways:
+        (a) thread types through conversion globally → faithful to the
+            unannotated surface syntax, but invasive and slows every comparison;
+        (b) synthesize the type LAZILY, only when the head is a symbol that has a
+            registered `when` (papp, comp, hcomp, ⌊_⌋) — infer just that subterm's
+            type on demand, leave the rest untyped. Much cheaper, localized.
+      Recommend (b): a `when`-trigger table (head symbol ↦ its guard), and only on
+      a hit do you call `Infer` to recover `u,v`/`Φ_Γ`. Keeps the common path
+      exactly as fast as now. The alternative — storing endpoints on the term at
+      elaboration (CCHM `@u₀,u₁` annotation) — avoids typed conversion but throws
+      away the unannotated-term win the proposal is built on, so only fall back to
+      it if (b) proves too costly.
+
+   Net: feature = "rewrite rules (free) + a carrier-typed canonizer hook in
+   eq_modulo + a lazy type-on-trigger for guards", and ONLY the overlap-agreement
+   case escalates to a real e-graph. Build 1→2→3, validate each against sketch.lp's
+   asserts before taking the next, and keep every core edit behind the registered
+   theory so plain Dedukti files pay nothing. *)
+
+
+(* >> No — and this is the important correction. The e-graph is NOT inevitable for
+   most of sketch.lp. Walk the mechanisms by what actually decides each case:
+
+   • INTERVAL / FACE algebra (De Morgan, absorption, De Morgan duality, …) is a
+     CANONIZER, i.e. Shostak-style with `solve ≔ none` — `can`/`canF` compute a
+     normal form (Dnf) and `eqDnf` compares it. A canonizer is a NORMAL-FORM
+     FUNCTION, not an e-graph. Decidable by a function call. No saturation.
+
+   • CONGRUENCE over the uninterpreted cubical operators (`p @ ((i∨j)∧i) ≡ p @ i`,
+     sketch.lp:141) you get FOR FREE from the existing `eq_modulo`: it already
+     recurses `p @ a` vs `p @ b` into `a` vs `b`, and the canonizer hook decides
+     `a ≡ b`. Structural-recursion-of-conversion IS congruence closure for the
+     DIRECTED case. Still no e-graph.
+
+   • PATH-η (`pabs (λi, p@i) ≡ p`) is just η — handle it the way Lean/Agda handle
+     function/record η: TYPE-DIRECTED η-expansion on demand inside eq_modulo (when
+     one side is `pabs`-headed at Path type, η-expand the other). Needs the typed-
+     conversion hook from step 3, NOT saturation.
+
+   • BOUNDARY / β and the primPOr RESTRICTIONS (i) are orientable → ordinary
+     guarded rewrite rules. No e-graph.
+
+   What's LEFT pulling toward egglog is exactly ONE thing: the overlap-agreement
+   coherence (ii) under primPOr — non-orientable (`⌊u⌋ ≡ ⌊v⌋`, no canonical side),
+   mutually triggering, and worst under metavariables (proposal §3). And even THAT
+   has a non-e-graph route: discharge it as an ELABORATION-TIME coherence
+   obligation (a finite conversion check when primPOr is formed, à la Cubical
+   Agda's CtSplitPartial), rather than a conversion-time saturating rule. As
+   sketch.lp:210 notes, (ii) is derivable from (i) by transitivity, so on closed
+   terms reducing through (i) already decides it.
+
+   So the honest picture: you can build and pass ALMOST ALL of sketch.lp with
+   {canonizer hook + structural congruence + typed η + orientable rewrites} and
+   NO e-graph. The e-graph is the tool of LAST RESORT for one case — saturating
+   overlap-agreement during conversion when terms carry metavariables and merges
+   enable merges in an order structural recursion can't discover. Whether that
+   case truly forces an e-graph (vs. an elaboration-time check) IS the thesis's
+   open question — so "inevitable" is precisely what's unproven, not a given.
+   Practical consequence: don't build the e-graph first. Build 1+2+typed-η, get
+   §1–§6 of sketch.lp green, and only then attack §7c — at which point you'll know
+   empirically whether you can avoid egglog or not. *)
+
+(* >> Checked the actual Agda source (src/full/Agda/TypeChecking/Primitive/
+   Cubical*.hs, github.com/agda/agda). Short version: Agda does NOT propagate
+   constraints via any e-graph / congruence closure — it uses a DNF CANONIZER
+   plus substitution-forcing, i.e. exactly the design sketch.lp already encodes.
+
+   INTERVAL / DE MORGAN. The interval is reduced by a normal form. The core fn is
+       decomposeInterval :: Term -> ReduceM [[(Int, Bool)]]
+   i.e. an interval expression → a list of conjunctive clauses, each clause a list
+   of (variable, polarity) literals = DISJUNCTIVE NORMAL FORM (join of meets of
+   signed literals). `primIMin` (∧), `primIMax` (∨), `primINeg` (~) are reduced
+   through `intervalView` pattern-matching with IZero/IOne terminal cases. THAT IS
+   LITERALLY sketch.lp's `Dnf` / `can` / `conjD`/`disjD`/`negD`: a list-of-signed-
+   literal-sets canonizer, equality by normal-form compare (`eqDnf`). So `theory
+   Interval` isn't speculative — it's a re-encoding of what Agda already does, as
+   a registered canonizer instead of hard-wired primitive reductions. De Morgan
+   laws (~~i=i, distributivity, absorption) fall out of the normal form, no
+   propagation.
+
+   FACES / SYSTEMS. A face/cofibration (IsOne φ) is decided the same way — DNF on
+   the face lattice; `combineSys` / `decomposeInterval` split a system by its
+   faces. "Propagation" here is just SUBSTITUTION-forcing: to work on the i=0
+   face, substitute i:=i0 and renormalise; face entailment φ⊨ψ is a normal-form
+   query, not a fixpoint. No union-find, no saturation.
+
+   SYSTEM OVERLAP COHERENCE (the primPOr "agree on the intersection" condition) is
+   checked when the SYSTEM IS FORMED — the partial-element/`compData`/
+   `transpSysTel'` machinery requires the branches to agree on overlapping faces,
+   via face-restricted conversion at elaboration time. NOT a conversion-time
+   saturating rule. This is direct external validation of the recommendation two
+   comments up: overlap-agreement as an ELABORATION obligation (their
+   CtSplitPartial), not an e-graph.
+
+   BOTTOM LINE for the thesis: Agda's whole §1–§6 equivalent runs on {DNF
+   canonizer + substitution forcing + elaboration-time system coherence} — no
+   e-graph anywhere. So you can mirror them exactly for the bulk, and the e-graph
+   stays reserved for the one thing Agda does NOT do in conversion: saturate
+   overlap-agreement under METAVARIABLES (Agda sidesteps it by only checking
+   coherence on concrete, fully-given systems). That gap is precisely your novelty
+   — and confirms it's narrow.
+   Refs: github.com/agda/agda src/full/Agda/TypeChecking/Primitive/Cubical/ ;
+   Vezzosi–Mörtberg–Abel, "Cubical Agda" (ICFP 2019),
+   staff.math.su.se/anders.mortberg/papers/cubicalagda.pdf *)
+
+(* >> Added to sketch.lp (in §5, right after the "interval theory fires UNDER
+   paths" assert). It defines:
+       symbol f g : A → A;
+       symbol hpt : Π (x:A), Path A (f x) (g x);          // pointwise path
+       symbol funext : (Π x, Path A (f x) (g x)) → Path (A→A) f g;
+       rule funext $h ↪ pabs (A→A) (λ i, λ x, ($h x) @ i);
+   plus three asserts:
+     • ((funext hpt) @ i) t ≡ hpt t @ i      — pointwise computation, pure β;
+     • (funext hpt) @ i0 ≡ f  and  @ i1 ≡ g  — the two boundaries.
+   The point of choosing funext: it is the cleanest case where the boundary
+   `when` must fire UNDER a binder — `hpt x : Path A (f x) (g x)` is only known by
+   reading the type of `hpt x` beneath `λ x`, then η closes `λ x, f x ≡ f`. So it
+   doubles as the minimal motivating example for the TYPE-DIRECTED conversion of
+   step 3 (eval comment above / proposal.md §"Metatheory" 3): an untyped engine
+   literally cannot discharge `(funext hpt) @ i0 ≡ f`. Note it parses but does NOT
+   check in stock lambdapi (needs `when`/`theory`) — it's an illustrative target,
+   same status as the rest of sketch.lp. *)
+
+(* >> Your instinct is right, and it has a precise name — but it splits in two and
+   only ONE half is unification. Let me separate them, because the split is the
+   whole design.
+
+   WHAT YOU'RE DESCRIBING. "Don't substitute i:=i0 and reduce; instead ADD the
+   equation `p x i0 = f x` to a context Θ′ and decide conversion *modulo* Θ′."
+   That is exactly CONVERSION MODULO A SET OF GROUND EQUATIONS, and Θ′ is — quite
+   literally — an e-graph: "add equation a = b" == "union the classes of a and b";
+   "decide ≡ under Θ′" == "are they in the same class after congruence closure".
+   So you haven't avoided the e-graph by introducing Θ′; you've REDISCOVERED it.
+   Θ′ IS the e-graph, and the proposal's Φ_Γ is the cofibration slice of it.
+
+   IS IT UNIFICATION? Only in the metavariable case — and that distinction is the
+   one to write down:
+     • GROUND (f, g, p closed; your sketch.lp funext): adding `p x i0 = f x` and
+       closing under congruence is GROUND CONGRUENCE CLOSURE — decidable, total,
+       and ORDER-INDEPENDENT. The order-worry you raise ("the order may affect
+       it") is exactly what saturation-to-a-fixpoint removes: the congruence
+       closure of a set of equations is unique regardless of merge order (the
+       egglog/Kleene-fixpoint guarantee). So if you saturate, order can't bite.
+       It only bites if you do ad-hoc DIRECTED rewriting with Θ′ — which is the
+       very non-confluence you're trying to escape. Saturation is the cure, not
+       a new disease.
+     • WITH METAVARS (`?K : PathP (λi.?B i) f g`, `?p`): now "add `?p @ i0 = f`"
+       can force a solution of `?B`/`?p`, so deciding the equation INTERLEAVES
+       with solving metavariables = E-UNIFICATION (unification modulo the path/
+       face theory). THIS is the hard, possibly-non-terminating half — proposal
+       §"Metatheory" 3, and sketch.lp §7c's "saturation interleaves with
+       unification." Ground Θ′ is decidable; metavar Θ′ is the open question.
+
+   WHY YOUR "ADD, DON'T REDUCE" CHOICE IS CORRECT (and why it implies the e-graph).
+   Boundary-as-oriented-rewrite (`p x i0 ↪ f x`) is fragile precisely because path
+   types create critical pairs it can't confluently resolve — your own worry.
+   Refusing to orient, and instead UNIONING `p x i0` with `f x` and congruence-
+   closing, is the standard escape (Nelson–Oppen / egglog): equivalence, not
+   orientation. So "always add more information" is the right instinct — but it
+   buys you the e-graph's obligations, not freedom from them:
+     – SOUNDNESS: every equation you add to Θ′ must be a REAL definitional
+       equality, else you collapse the theory (this is what `consistent ≔ wf`
+       guards — reject Θ′ that forces i0 = i1). "Add more info" is only safe up to
+       consistency.
+     – TERMINATION: ground closure terminates; the metavar case is the thing the
+       thesis must bound. Don't promise it, prove it (or bound the e-matching
+       depth).
+
+   YOUR RULE SKETCH, cleaned up. What you wrote as
+       when ?K : PathP (λ i → ?B i) f g,  ?p : Path ?K i0  --->  ?p i0 [= f]
+   is the metavariable-generalised §3 boundary `when`: for `?p : PathP ?B f g`,
+   register `?p @ i0 = f` (and `?p @ i1 = g`) into Θ′. Two corrections:
+     (1) `Path ?K i0` is ill-formed — you mean the application `?p @ i0`, not a
+         Path-type; the endpoints f,g come from ?p's TYPE `PathP ?B f g`, read by
+         the guard (the unannotated win).
+     (2) the head must be `?p @ i0`, not `?K`. So: `when ?p : PathP ?B f g ⊢
+         ?p @ i0 ≡ f ⊢ ?p @ i1 ≡ g`, with the understanding that ⊢ here MERGES
+         into Θ′ rather than orienting.
+   You're right it's undocumented — it should be the central judgement of the
+   proposal: write conversion as `Θ′ ⊢ a ≡ b`, state that boundary/η/overlap
+   `when`s ACT BY MERGING into Θ′, prove ground decidability, and isolate the
+   metavar/E-unification case as the open problem. Implementation order follows:
+   ground e-graph first (funext, §1–§6), metavar interleaving last (§7c). *)
+
+
+(* >> Yes — and that is very likely the right design for the KERNEL. Better: the
+   funext example you just added is ALREADY ground. `f`, `g`, `hpt` are declared
+   `symbol`s, not metavariables; so `(funext hpt) @ i0 ≡ f` is a ground conversion,
+   decided by ground congruence closure over Θ′. Nothing in §1–§6 of sketch.lp,
+   the squares (§7b), or funext needs a metavariable. They're all ground.
+
+   WHERE METAVARS ACTUALLY COME FROM: not the mathematics — ELABORATION. They're
+   inserted for implicit/inferred arguments of the UNANNOTATED surface syntax
+   (write `funext h` and the elaborator invents `?A ?B ?f ?g` and solves them).
+   The CORE cubical calculus (CCHM/CHM) has NO metavariables; its canonicity /
+   normalisation metatheory is stated for GROUND terms. So "do it with only ground
+   variables" isn't a restriction of the math — it's literally the formal system
+   the soundness/decidability proofs are about. Metavar E-unification is an
+   elaboration-UX layer bolted on top, not part of the object of study.
+
+   THE DESIGN THAT FALLS OUT (and it's the Lean discipline again):
+     • KERNEL / conversion: ground only. Θ′ accumulates ground equations,
+       congruence-close to a fixpoint — finite, order-independent, DECIDABLE. This
+       carries all of §1–§6 + the squares. The open question (saturation under
+       metavars) simply does not arise here.
+     • ELABORATOR (untrusted): solve metavariables by ORDINARY pattern (Miller)
+       unification — NOT modulo the path/face theory. When a metavar can only be
+       pinned by a theory equation (the genuinely E-unification case), DON'T solve
+       it in the theory: postpone, or require the user to annotate. Then hand a
+       fully ground term to the kernel.
+   Net: you confine everything decidable to the trusted core and keep the one
+   undecidable-in-general thing (theory E-unification) out of it entirely.
+
+   THE PRICE — and it's exactly the proposal's central tension. A ground-only
+   kernel means some terms Agda elaborates via theory-aware unification will, here,
+   need the user to WRITE the endpoints/faces — i.e. you partly give back the
+   `@u₀,u₁` annotation that proposal line 4 set out to eliminate. So "unannotated
+   surface syntax" and "ground-only decidable kernel" pull against each other:
+     – ground kernel + best-effort syntactic elaboration  = shippable, decidable,
+       matches the metatheory, occasionally asks for an annotation;
+     – theory E-unification in elaboration  = fewer annotations, but reopens the
+       termination question.
+   Recommendation: BUILD the ground kernel (it's the thesis's provable core and it
+   already covers funext/the squares), and treat theory-aware elaboration as a
+   clearly-scoped extension whose termination is the stated open problem. You lose
+   nothing provable by staying ground; you only trade some inference convenience —
+   and you can measure exactly how often, by counting the annotations sketch.lp
+   would need under a ground-only elaborator. *)
+
+(* >> The fix is a change of KIND of variable, and it dissolves the whole worry.
+   Your `?K, ?p, ?B` are written as METAVARIABLES — unknowns to be SOLVED by
+   unification. But a `when`/rewrite rule never solves anything: its variables are
+   PATTERN (schema) variables, bound by MATCHING against whatever ground term
+   shows up. In lambdapi surface they're the `$`-vars. So you don't write the rule
+   over metavariables at all — you write ONE schema:
+
+       when $p : Path $T $u $v  ⊢  $p @ i0 ≡ $u  ⊢  $p @ i1 ≡ $v
+
+   ($p,$T,$u,$v are slots, not unknowns.) "Representing it with ground variables"
+   is exactly what happens when this schema FIRES: it matches a CONCRETE subject
+   and every slot is instantiated to a GROUND subterm. Concretely, on your funext:
+
+     subject     = funext hpt                       -- ground; hpt is a symbol
+     its type     = Path (A→A) f g                   -- ground f, g
+     match        ⟹ $p := funext hpt, $T := A→A, $u := f, $v := g   (all ground)
+     fires        ⟹ MERGE into Θ′:  (funext hpt) @ i0 = f
+                                      (funext hpt) @ i1 = g          -- ground eqns
+     Θ′ ground    ⟹ congruence closure decides ≡.   No `?` ever exists.
+
+   So the metavariable-laden rule you wrote and the ground story are the SAME rule;
+   the `?`s were never needed. The schema is parametric; GROUNDNESS is a property
+   of the SUBJECT, not of the rule. Two regimes:
+
+     • SUBJECT GROUND (funext hpt, the squares, all of §1–§6): matching binds slots
+       to ground terms → ground equations into Θ′ → decidable. This is "the same
+       thing using ground variables" — you already have it.
+     • SUBJECT CONTAINS A METAVARIABLE (you wrote `funext ?h`, so its type is
+       `Path (A→A) ?f ?g`): now firing tries to merge `(funext ?h) @ i0 = ?f`,
+       which can SOLVE ?f — that's the E-unification case. It is triggered by the
+       SUBJECT carrying `?`, never by the rule.
+
+   Practical rule of thumb, then: keep every `when` a `$`-pattern schema (never
+   `?`), and guarantee the subject handed to conversion is ground (elaborate /
+   solve metavars first, per the previous comment). Under that discipline your
+   `?K…?p` rule is literally the `$p`-schema above, and the hard case simply never
+   reaches the kernel. Correction to the term you wrote, for the record: `Path ?K
+   i0` is still ill-formed — the endpoint obligation is the APPLICATION `$p @ i0`,
+   with `$u`(=f) read from `$p`'s type; there is no `Path … i0` type. *)
+
+
+(* >> Done. Updated both docs to the settled design — with one precision kept so
+   the claim stays defensible: the e-graph IS inevitable and embraced as the core
+   mechanism (merge into Θ′, don't orient — stop fighting confluence), BUT that's
+   the GROUND e-graph, which is decidable. The only thing still open is the
+   metavariable/E-unification case. I kept those two apart rather than saying
+   "e-graph saturation is the open question" flat, because the ground e-graph is
+   exactly what makes funext/the squares/§1–§6 decidable — it's the solution, not
+   the problem.
+   Edits:
+     • proposal.md — new section "Design conclusion: one judgement, Θ′ ⊢ a ≡ b —
+       merge, don't orient": states conversion as Θ′ ⊢ a ≡ b with Θ′ an e-graph,
+       `when` MERGES (no orientation), the confluence argument (order-independent
+       closure), the ground/metavariable split, and the ground-only kernel +
+       elaborator discipline. Also sharpened the "three walls → one question" line
+       to name the ground (decided) vs metavariable (open) split, and noted the
+       funext demo.
+     • sketch.lp — a "DESIGN (settled)" header block right after the require:
+       Θ′ ⊢ a ≡ b, theory=canonizer / when=merge, why merge-not-orient, and the
+       ground-decidable vs metavar-open split, cross-referencing proposal.md.
+   Net effect: the framework's pitch is now "one judgement + an e-graph you stop
+   fighting confluence with", and the scary surface is reduced to a single, named,
+   scoped open case. *)
+
+(* >> Two answers.
+   DO WE STILL NEED `theory`? Not redundant, but SEPARABLE — and not needed for
+   the core. It is the "X" of CC(X): an efficient CANONIZER (Dnf) that decides the
+   interval/face De Morgan algebra in one normal-form call. The e-graph alone is a
+   BAD substitute for that algebra — pushing commutativity / distributivity /
+   absorption in as merge rules makes the e-graph blow up (AC saturation), exactly
+   the wall the canonizer exists to avoid. So once you want the De Morgan
+   assert/assertnot battery (i∧j ≡ j∧i, distributivity, no-excluded-middle),
+   `theory` earns its place. BUT the path core — boundary, β, η, funext — never
+   touches ∧/∨/~; it needs only i0,i1. So `theory` is cleanly droppable for a
+   first version. Keep CC(X) factored: e-graph = CC (congruence over the cubical
+   formers), canonizer = X (the interval algebra); ship CC first, add X later.
+
+   CREATED sketch_simple.lp — the minimal core, no `theory`, no faces:
+     • interval = just {i0, i1} (no ∧/∨/~, no Dnf, no canonizer);
+     • Path/pabs/papp, β as an ordinary rewrite;
+     • boundary + path-η as `when`s that MERGE into Θ′;
+     • ground demonstrations: the three path asserts + the funext block.
+   Everything there is ground, so it is decided by ground congruence closure
+   alone — it exercises THE settled mechanism (Θ′ ⊢ a ≡ b, merge-not-orient) with
+   nothing else in the way. That makes it the right first implementation target:
+   get sketch_simple green, then layer `theory Interval/Face` back in for the
+   algebra (sketch.lp), then the metavariable case last. *)
+
+(* >> Checked. Three real OCaml options, and they sort by purpose:
+
+   • ego  (verse-lab/ego, on opam, v0.0.6) — e-graphs in OCaml, modelled on Rust's
+     `egg`: equality saturation, generic over user analyses, with cost-based
+     extraction. THE direct match for the Θ′ / merge-not-orient mechanism. Its
+     Ego.Generic interface (custom analysis + merge hook) can host the canonizer
+     as an analysis and `wf` as a merge guard. Best for PROTOTYPING the ground
+     e-graph fast. Caveat: 0.0.x, research-grade — verify activity, and it's a
+     dependency you'd be putting near the kernel.
+   • sidekick  (c-cube/sidekick, Simon Cruanes) — modular CDCL(T) SMT framework
+     whose core IS a congruence closure with theory combination and [wip] proof
+     generation. Architecturally the closest to CC(X) AND to the proposal's
+     "Alethe-style certificate per merge" line. Heavier and SMT-solver-shaped, but
+     the right reference if you want certificates + theory combination later. Its
+     `Sidekick_cc` is the component to look at.
+   • Alt-Ergo's CC(X)  (Conchon–Contejean) — the literal architecture proposal §3
+     cites. Not a standalone lib (embedded in Alt-Ergo), so it's the PAPER/CODE
+     reference, not a dependency.
+
+   RECOMMENDATION: prototype with `ego` (fastest to a working saturation experiment
+   in the language you know from egglog); keep `sidekick` as the model for the
+   eventual CC(X)+certificate kernel; cite Alt-Ergo CC(X) as the design ancestor.
+
+   BUT the gating caveat, independent of which lib: classical congruence closure /
+   e-graphs are FIRST-ORDER — uninterpreted functions over ground terms. Lambdapi
+   terms have BINDERS (λ, Π) and the cubical formers apply to functions (funext
+   merges UNDER λ x). Neither ego nor sidekick-cc handles HOAS/α-equivalence
+   natively. So whichever you pick, you must decide how binders enter the e-graph:
+   treat closed sub-λ's as opaque leaves (hash-consed up to α), or de-Bruijn-encode,
+   or e-graph only the first-order skeleton and recurse structurally under binders.
+   That decision — not the library choice — is the real work.
+
+   And a TCB note consistent with "minimal, auditable" (eval.ml:60): a 0.0.x
+   dependency inside the TRUSTED core enlarges the soundness surface. Fine for the
+   experiment; for the shipped kernel, a SMALL bespoke ground congruence closure
+   (union-find + signature table, a few hundred lines) may be the auditable choice,
+   with ego/sidekick as the oracle you validate it against.
+   Refs: github.com/verse-lab/ego (opam: `ego`) ; github.com/c-cube/sidekick ;
+   Conchon–Contejean CC(X) (Alt-Ergo). *)
+
+ (** The head-structure of a term t is:
 - λx:_,h if t=λx:a,u and h is the head-structure of u
 - Π if t=Πx:a,u
 - h _ if t=uv and h is the head-structure of u

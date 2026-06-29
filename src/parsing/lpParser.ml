@@ -112,6 +112,7 @@ let string_of_token = function
   | VERBOSE -> "verbose"
   | WHY3 -> "why3"
   | WITH -> "with"
+  | WHEN -> "when"
 
 let pp_token ppf t = Base.string ppf (string_of_token t)
 
@@ -655,12 +656,78 @@ let rec command pos1 (p_sym_mod:p_modifier list) (lb:lexbuf): p_command =
       let i = qid lb in
       let n = notation lb in
       extend_pos (*__FUNCTION__*) pos1 (P_notation(i,n))
+  | WHEN -> 
+  (**when p : Path T u v
+   ⊢ p @ i0 ≡ u
+   ⊢ p @ i1 ≡ v; *)
+      if p_sym_mod <> [] then expected "" [SYMBOL]; (*or modifiers*)
+      let pos1 = current_pos() in
+      consume_token lb;
+      let head = qid lb in             (* the head symbol the constraint keys on *)
+      let subj = aterm lb in           (* the subject pattern, e.g. $p *)
+      consume COLON lb;
+      let l = term lb in
+      let consume_turnstyle_statements lb =
+        let rec aux acc =
+          match current_token() with
+          | TURNSTILE ->
+              consume_token lb;
+              let eq = equation lb in
+              aux (eq::acc)
+          | _ -> List.rev acc
+        in aux []
+      in
+        extend_pos pos1 (P_when (head, (subj, l), consume_turnstyle_statements lb))
   | _ ->
       if p_sym_mod <> [] then expected "" [SYMBOL]; (*or modifiers*)
       let pos1 = current_pos() in
       let q = query lb in
       extend_pos (*__FUNCTION__*) pos1 (P_query(q))
 
+(* >> Progress: syntax.ml now builds (your eq_p_command + fold_command arms are
+   good). I ran `dune build src/parsing/` — it's now failing one layer down,
+   exactly the next item flagged: pretty.ml:363-402, the `command` printer, is
+   non-exhaustive ("case not matched: P_when (_, _)") → fatal Warning 8.
+   FIX — add an arm before the closing `end` (line 402), matching the doc-comment
+   surface syntax `when name : ty ⊢ t ≡ u ⊢ …`:
+       | P_when ((name, ty), eqs) ->
+           let eqn ppf (t, u) = out ppf "@ ⊢ %a ≡ %a" term t term u in
+           out ppf "@[when %a :@ %a%a@]" qident name term ty (List.pp eqn "") eqs
+   (`out`, `qident`, `term`, `List.pp <pp> <sep>` are all already used in this
+   function — cf. lines 364/372/370.)
+   AFTER that, the last non-wildcard match is src/handle/command.ml (~244), where
+   P_when needs REAL handling, not a printer — that's the actual feature work
+   (register the when-rule), not just a build fix. coq.ml:364 / rawdk.ml:178 stay
+   safe via their `| _ ->`.
+   Want me to just apply the pretty.ml arm and rebuild? Say "fix it". *)
+
+(* >> DONE — `dune build` is green and `when` parses end-to-end. Beyond the two
+   build-fix arms I had flagged, the build surfaced TWO more gaps the static
+   read missed, plus a real parser bug. Full set of edits:
+     1. src/parsing/lpLexer.ml  — added `| "when" -> WHEN`. The WHEN *token*
+        existed but the lexer never mapped the keyword, so `when` lexed as a UID
+        and the dispatcher hit "command keyword missing". (Root cause of the
+        first runtime failure — invisible to a pure type-check.)
+     2. src/parsing/lpParser.ml (this WHEN branch) — two parser bugs:
+          • added `consume_token lb` to consume the `when` keyword before `qid`
+            (it was calling `qid` while the current token was still WHEN);
+          • removed the per-equation `consume SEMICOLON`: the trailing `;`
+            terminates the whole command (the top-level driver at ~1707 expects
+            it), and statements are separated by `⊢`, not `;`. Now both
+            `when p : T ⊢ a ≡ b;` and multi-line `… ⊢ … ⊢ …;` parse.
+          • also added the `if p_sym_mod <> [] then expected …` modifier guard
+            for consistency with the other command arms.
+     3. src/parsing/pretty.ml      — P_when printer arm (round-trips the surface).
+     4. src/handle/command.ml      — P_when arm: `fatal "… not yet implemented …"`.
+        Kernel/conversion semantics are the actual feature (your thesis), so this
+        is an honest stub, not a silent no-op.
+     5. src/export/rawdk.ml        — P_when added to the "Cannot be translated"
+        group (its command match had NO wildcard — my earlier "safe" call was
+        wrong; coq.ml:364 genuinely does have `| _ ->`, so it's fine).
+   Verified: `lambdapi check` on a file with single- and multi-`⊢` `when`
+   commands parses fully and stops only at the deliberate handler stub. Next
+   real step is implementing that handler (register the when-rule into
+   conversion) — say the word and we can scope it. *)
 and inductive (lb:lexbuf): p_inductive =
   let pos0 = current_pos() in
   let i = uid lb in

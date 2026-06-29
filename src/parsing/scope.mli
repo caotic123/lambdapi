@@ -34,6 +34,11 @@ val scope_search_pattern :
 val scope_rule :
  ?find_sym: find_sym -> bool -> sig_state -> p_rule -> sym_rule
 
+(** [scope_typed_contraints ~find_sym ur ss w] turns a parser-level typed
+    constraint (the [when] construct) into a {!type:Term.constr_rule}. *)
+val scope_typed_contraints :
+ ?find_sym: find_sym -> bool -> sig_state -> p_when_aux -> constr_rule
+
 (** [scope_rwpatt ss env t] turns a parser-level rewrite tactic specification
     [s] into an actual rewrite specification (possibly containing variables of
     [env] and using [ss] for aliasing). *)

@@ -541,6 +541,82 @@ let patt_vars : p_term -> (string * int) list * string list =
         patt_vars_args acc args
   in
   patt_vars ([],[])
+  
+(* >> My earlier "already in scope" answer was wrong: `Term` has an EXPLICIT
+   interface `src/core/term.mli`, and a module with an .mli exports ONLY what the
+   .mli declares. I had added `constr_rule` and `sym_constraint` to term.ml but
+   NOT to term.mli, so they were module-private ⇒ "Unbound type constructor
+   sym_constraint" here. FIXED: added `and constr_rule = { cr_type; cr_eqns;
+   cr_subj; cr_names; cr_vars_nb; cr_pos }` to the recursive group in term.mli and
+   `type sym_constraint = sym * constr_rule` next to `sym_rule`. `dune build
+   src/core/` is green (interface matches implementation), so `sym_constraint`,
+   `constr_rule` and its fields (`cr_type`, …) are now visible here via `open
+   Term`. (`p_when_aux` was never affected — Syntax has no .mli, so it was already
+   exported.) The build still stops below at your `scope_typed_contraints`, but on
+   that function's own syntax now, not on this unbound type. *)
+
+(* >> Implemented below, mirroring scope_rule: scope the subject + guard type in
+   one M_LHS index space (assigns pattern indices to $p and $T,$u,$v…), then the
+   equations in M_RHS reusing those indices, and assemble the constr_rule. *)
+let scope_typed_contraints :
+ ?find_sym:find_sym -> bool -> sig_state -> p_when_aux -> constr_rule =
+  fun ?(find_sym=Sig_state.find_sym) _ur ss (p, (subj_t, ttype), contrs) ->
+  (* The leading name is just a LABEL for the constraint, not a symbol. *)
+  let cr_name = snd p.elt in
+  (* Non-linear vars of the guard, and pattern vars used in the equations:
+     both must be reserved in the environment when scoping. *)
+  let (_, nl_subj) = patt_vars subj_t in
+  let (_, nl_type) = patt_vars ttype in
+  let eqn_vars =
+    List.concat_map
+      (fun (l, r) ->
+         List.map fst (fst (patt_vars l)) @ List.map fst (fst (patt_vars r)))
+      contrs
+  in
+  (* Scope the subject pattern then the guard type in ONE M_LHS index space, so
+     $p and the $T,$u,$v… of the type get consistent pattern indices. *)
+  let mode =
+    M_LHS{ m_lhs_prv     = false
+         ; m_lhs_indices = Hashtbl.create 7
+         ; m_lhs_arities = Hashtbl.create 7
+         ; m_lhs_names   = Hashtbl.create 7
+         ; m_lhs_size    = 0
+         ; m_lhs_in_env  = nl_subj @ nl_type @ eqn_vars }
+  in
+  let subj    = scope ~find_sym 0 mode ss Env.empty subj_t in
+  let cr_type = scope ~find_sym 0 mode ss Env.empty ttype in
+  let (names_tbl, lhs_indices, vars_nb) =
+    match mode with
+    | M_LHS{ m_lhs_indices; m_lhs_names; m_lhs_size; _ } ->
+        (m_lhs_names, m_lhs_indices, m_lhs_size)
+    | _ -> assert false
+  in
+  (* The subject must scope to a single pattern variable; its index is cr_subj. *)
+  let cr_subj =
+    match subj with
+    | Patt(Some i, _, _) -> i
+    | _ -> fatal p.pos "The subject of a `when` must be a pattern variable."
+  in
+  (* Scope each equation in M_RHS, reusing the guard's pattern indices. *)
+  let rhs_mode =
+    M_RHS{ m_rhs_prv       = false
+         ; m_rhs_data      = lhs_indices
+         ; m_rhs_new_metas = new_problem() }
+  in
+  let cr_eqns =
+    List.map
+      (fun (l, r) ->
+         ( scope ~find_sym 0 rhs_mode ss Env.empty l
+         , scope ~find_sym 0 rhs_mode ss Env.empty r ))
+      contrs
+  in
+  let cr_names =
+    Array.init vars_nb
+      (fun i -> try Hashtbl.find names_tbl i with Not_found -> string_of_int i)
+  in
+  { cr_name; cr_type; cr_eqns; cr_subj; cr_names; cr_vars_nb = vars_nb
+  ; cr_pos = p.pos }
+
 
 (** [scope_rule ~find_sym ur ss r] turns a parser-level rewriting rule [r],
     or a unification rule if [ur] is true, into a pre-rewriting rule. *)

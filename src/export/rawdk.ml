@@ -238,6 +238,7 @@ let command : p_command pp = fun ppf ({elt; pos} as c) ->
   | P_notation _ (* FIXME: accept quantifier notations *)
   | P_opaque _
   | P_require(Some _,_)
+  | P_when _
   | P_symbol{p_sym_prf=Some _; _}
     -> fatal pos "Cannot be translated: %a" Pretty.command c
 

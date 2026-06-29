@@ -137,6 +137,12 @@ let rec pvars_lhs : p_term -> StrSet.t = fun {elt;pos} ->
 type p_rule_aux = p_term * p_term
 type p_rule = p_rule_aux loc
 
+(** Parser-level typed constraint (the [when] construct): the head symbol
+    [p_qident] the constraint is keyed on, then the guard (subject pattern
+    [p_term] e.g. [$p], and its type [p_term] e.g. [Path $T $u $v]), then the
+    list of [⊢ l ≡ r] equations. *)
+type p_when_aux = p_qident * (p_term * p_term) * (p_term * p_term) list
+
 (** Parser-level inductive type representation. *)
 type p_inductive_aux = p_ident * p_term * (p_ident * p_term) list
 type p_inductive = p_inductive_aux loc
@@ -357,6 +363,7 @@ type p_command_aux =
   | P_coercion of p_rule
   | P_query of p_query
   | P_opaque of p_qident
+  | P_when of p_when_aux
 
 (** Parser-level representation of a single (located) command. *)
 type p_command = p_command_aux loc
@@ -523,6 +530,10 @@ let eq_p_command : p_command eq = fun {elt=c1;_} {elt=c2;_} ->
   | P_unif_rule r1, P_unif_rule r2 -> eq_p_rule r1 r2
   | P_coercion r1, P_coercion r2 -> eq_p_rule r1 r2
   | P_query(q1), P_query(q2) -> eq_p_query q1 q2
+  | P_when(h1,(s1,t1),l1), P_when(h2,(s2,t2),l2) ->
+      eq_p_qident h1 h2 && eq_p_term s1 s2 && eq_p_term t1 t2
+      && List.eq (fun (a,b) (c,d) -> eq_p_term a c && eq_p_term b d) l1 l2
+      && List.eq (fun (t1,u1) (t2,u2) -> eq_p_term t1 t2 && eq_p_term u1 u2) l1 l2
   | _, _ -> false
 
 (** [fold_proof f acc p] recursively builds a value of type ['a] by starting
@@ -725,6 +736,10 @@ let fold_idents : ('a -> p_qident -> 'a) -> 'a -> p_command list -> 'a =
              (Pos.make pos
                 (P_LLet (p_sym_nam, p_sym_arg, p_sym_typ, t, d))))
         p_sym_prf
+    | P_when (h, (s, l), eqs) ->
+           let a = f a h in
+           let a = fold_term a s in
+           let a = fold_term a l in
+           List.fold_left (fun a (t,u) -> fold_term (fold_term a t) u) a eqs
   in
-
-  List.fold_left fold_command
+    List.fold_left fold_command
