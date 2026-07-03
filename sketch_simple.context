@@ -1,0 +1,148 @@
+sketch_simple — DESIGN LOG / CONTEXT
+=====================================
+
+The reasoning that produced sketch_simple.lp, moved out of the source so the .lp
+stays a clean spec. Read the .lp for "what"; read this for "why".
+
+
+1. PATTERN VARIABLES vs METAVARIABLES
+-------------------------------------
+In a `when` head use `$x` (PATTERN / rule variable, bound by MATCHING the ground
+subject), NOT `?x` (METAVARIABLE, solved by unification). A head's T,u,v,p are
+matched, not solved. `i0`,`i1` and the λ-bound dimension stay bare (concrete
+symbol / binder); the keyed symbol `papp` stays bare — it is the index key, not a
+variable. Writing `?` would assert "these get solved", i.e. the hard
+E-unification case we deliberately keep OUT of the kernel.
+
+
+2. `when` SURFACE SYNTAX — EVOLUTION
+------------------------------------
+v1: `when <head-symbol> <subj> : <type> ⊢ eqns`, head = the symbol the merge is
+    keyed on (like a rewrite rule's LHS head). `pabs $p` was never an application
+    — head and subject are two separate grammar slots, juxtaposed.
+Conclusion (see §5): the trigger the semantics actually wants is the TYPE, not a
+term symbol. Final forms:
+    boundary:  when papp $p : PathP $H $x $y ⊢ $p @ i0 ≡ $x ⊢ $p @ i1 ≡ $y;
+    η:         when      $p : PathP $H $x $y ⊢ ⟨i⟩ ($p @ i) ≡ $p;
+boundary keeps a `papp` key (first-order / demand, §6); η is keyed on the `PathP`
+type (eager / build, §6).
+
+
+3. IMPLEMENTATION STATUS (parser / AST / printer / handler cascade)
+-------------------------------------------------------------------
+Six coordinated edits for `when <head> <subj> : <ty> ⊢ …`:
+  1. syntax.ml   — p_when_aux = p_qident * (p_term * p_term) * (p_term*p_term) list
+                   (head, (subject pattern, type), eqns).
+  2. syntax.ml   — eq_p_command and fold_command P_when arms → the 3-tuple
+                   (eq also compares the equations via List.eq).
+  3. lpParser.ml — WHEN branch: head = qid, then subj = aterm (atomic-term parse,
+                   so `$p` reads as a P_Patt and stops at `:`), then `: type ⊢ …`.
+  4. pretty.ml   — prints `when <head> <subj> : <ty> ⊢ …`.
+  5. command.ml  — handler `P_when(_head,(_subj,_typ),_conseq)` (stub; storage next).
+syntax.ml COMPILES; the build stops at scope.ml:566 — `scope_typed_contraints` is
+mid-write (`(_, {cr_type: lhs})` is a syntax error). Finish that and the rest
+links. Grammar change: old-style `when p : …` (no head, as in sketch.lp) no
+longer parses — expected.
+NB: this status predates the move to type-keyed η. The parser likely wants the
+head OPTIONAL: boundary carries a `papp` head; η carries none (its key is the
+`PathP` TYPE of the subject).
+
+
+4. WHY A DEDICATED PATH FORMER (not bare `λ i, X : I → T`)
+----------------------------------------------------------
+(a) Endpoints must live in the TYPE. `PathP H x y` is INDEXED by its ends; that
+    is the whole point of using paths as the identity-type replacement (funext,
+    `(funext hpt) @ i0 ≡ f`, … all read endpoints off the type). A bare `λ i, X`
+    has type `I → T`, endpoint-BLIND; you'd have to re-attach the ends as a Σ of
+    equalities — strictly MORE machinery.
+(b) `I` is a DIMENSION pretype, not an ordinary type, and `I → T` is not an
+    ordinary Π (De Morgan algebra, dimension substitution, faces; not in the
+    universe). So `λ i, X` is not a kernel λ. The path former is the explicit,
+    well-typed bridge between dimension-abstraction and ordinary terms.
+
+
+5. cubical Agda: TYPE-DIRECTED, CHECKED BOUNDARY
+------------------------------------------------
+cubical Agda has NO separate `pabs`: it reuses `λ i → t` and discriminates by the
+EXPECTED type. `λ i → t : Path A x y` is a path; `: I → A` is a function. So
+path-hood is type-DIRECTED — a typing constraint — and `refl ≔ λ i → x`.
+
+COMPUTED vs CHECKED boundary (the design fork):
+  • computed (old `pabs : Π(f:I→T), Path T (f i0)(f i1)`): boundary read off f;
+    no elaborator support, but a constructor symbol.
+  • CHECKED (adopted): elaborate `⟨i⟩ t` against `PathP H x y`, VERIFY t[i0]≡x,
+    t[i1]≡y in CHECK mode (the (PathP-I) rule). Inherits path-η from function-η.
+Cost of the checked route: `I` / dimension-abstraction must be recognized as a
+PRIMITIVE by the elaborator (exactly what cubical Agda hard-wires) + bidirectional
+checking against `PathP`. Same "I is special" cost, relocated from a symbol into
+the type-checker — and it composes: once path-hood is type-driven, the η `when`
+keys on the `PathP` type too.
+
+
+6. THE SPLIT DESIGN + GUARDS
+----------------------------
+The two laws are NOT the same kind of constraint — split them by the ARITY of the
+keyed symbol:
+  • boundary — `papp` has NO binder ⇒ FIRST-ORDER match `papp _ _ _ $p $e`,
+    demand-driven; fires only where `p @ iε` actually occurs; terminating.
+  • η — `⟨i⟩`'s argument IS a binder. Recognizing an η-redex by MATCHING needs
+    HO matching under the binder; BUILDING `⟨i⟩ (p @ i)` from a known p does not.
+    So η is TYPE-keyed on `PathP` and EAGER: build, then merge. No HO matching.
+A uniform `when <head> <subj> : <type>` is the smell that hid this.
+
+Guards / edge-cases:
+  G1 η-TOWER (the real termination trap). Eager η on class c builds q=⟨i⟩(c@i),
+     itself a path class ⇒ η would fire on q ⇒ ⟨i⟩(q@i) ⇒ … It converges ONLY
+     because q@i ↪β c@i makes each new term identical. GUARD: skip η for a class
+     that already has a `⟨i⟩(_@i)` representative (β-normalize body before dedup).
+  G2 Do NOT make boundary type-directed: that eagerly mints p@i0,p@i1 for every
+     path even where `@` is unused. Demand-keying is strictly better, stays 1st-order.
+  G3 GROUND = ground-after-SKOLEMIZATION. funext needs boundary to fire on
+     `hpt x @ i0` UNDER λx; "ground" holds only once x is skolemized to a fresh
+     const, then $x,$y bind to f c, g c. Decidable, but CC-with-skolems.
+  G4 ENDPOINT-GROUNDNESS GATE. Fire only when H,x,y are ground (no unsolved
+     metas); else DEFER. Asserting `p@i0=?x` or minting `⟨i⟩ …` with a meta
+     injects an unsolved into Θ′. Use class representatives. (See §7: this is the
+     "search the context / meta-variable" worry — resolve endpoints from the TYPE.)
+  G5 CLASS TYPING + STRATIFICATION. The η trigger needs every class tagged with a
+     normal ground type via conversion that itself uses Θ′. One level here; nested
+     PathP (squares) need type-tagging stratified by level or it diverges.
+  G6 CONFLUENCE IS FREE. Both laws are e-graph UNIONS (symmetric), not oriented
+     rewrites ⇒ CC gives the unique closure regardless of firing order. THAT is
+     why path-η, "the rule that can't be a confluent rewrite," is admissible as a
+     merge. The only obligation is termination of term GENERATION (G1).
+  G7 boundary is REDUNDANT on ⟨i⟩-headed paths (β already computes the end) —
+     needed only on NEUTRAL paths (p, hpt x). Mirror of G1; may restrict boundary
+     to classes with no ⟨i⟩ rep.
+  G8 MINT WITH KNOWN ENDPOINTS. When the engine builds papp/⟨i⟩ nodes it fills
+     H,x,y from the class's type, never leaves `_` metas (ties to G4).
+
+
+7. funext FACES — the precise cubical-Agda trace
+------------------------------------------------
+Checking `funext p ≔ ⟨i⟩ (λ x, p x @ i)` against `PathP (λ i, (x:A)→B x i) f g`,
+(PathP-I) generates TWO boundary obligations — one per endpoint, with i
+SUBSTITUTED BEFORE the comparison (so each face is a DISTINCT equation against a
+DISTINCT endpoint; it is NEVER one `λ x, p x @ i ≡ f ≡ g`):
+    i := i0:   funext p @ i0 ≡ f   at type (x:A) → B x i0
+    i := i1:   funext p @ i1 ≡ g   at type (x:A) → B x i1
+
+Reduce the i0 face:
+    funext p @ i0  = λ x, p x @ i0                       (β)
+    p x : PathP (B x) (f x) (g x)  ⇒  p x @ i0 ⟶ f x     (endpoint computation:
+                                       the IApply / reduceIApply' boundary)
+    so the face becomes  λ x, f x  ≡  f                  (function-η)
+
+Propagation in our framework (the e-graph view):
+  • Generalize `funext p ↦ p0 : PathP (λ i, (x:A)→B x i) f g`. The boundary law
+    `when p : PathP H x y ⊢ p @ i0 ≡ x` instantiates to `p0 @ i0 ≡ f`.
+  • For the concrete redex, `p x @ i0 ≡ f x` enters Θ′ (per-fibre boundary, under
+    the skolemized x — G3).
+  • "modulo checking" then has to (i) see `λ x, p x @ i0` and `λ x, f x` as equal
+    by CONGRUENCE under λ from the per-fibre fact, and (ii) collapse `λ x, f x ≡ f`
+    by function-η. Both are merges in Θ′; no orientation needed (G6).
+  • The endpoints f, g must come from the TYPE (ground), NOT by searching the
+    context for a matching term — that is the meta-variable worry, handled by the
+    endpoint-groundness gate (G4): if an endpoint is an unsolved meta, defer.
+
+This is exactly what sketch_simple.lp encodes up to `funext`.

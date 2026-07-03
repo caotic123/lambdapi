@@ -13,6 +13,15 @@ let log = log.pp
 (** Exception that may be raised by type inference. *)
 exception NotTypable
 
+(** Hook fired at every {!val:infer} result as [hook ctxt term inferred_type].
+    No-op by default.  The e-graph coordinator (handle layer) installs a recorder
+    here — this INVERTS the dependency so [core] needn't depend on the e-graph
+    library.  It is a [Stdlib.ref] (not [Timed]) so that installing it is NOT
+    undone by unification backtracking; the recorder must only stash references
+    (terms are mutable, metas resolve in place, so a post-solve replay is ground). *)
+let infer_hook : (ctxt -> term -> term -> unit) Stdlib.ref =
+  Stdlib.ref (fun _ _ _ -> ())
+
 (** [unif p c a b] adds the constraint [c |- a==b] in [p] if [a] is not
     convertible to [b]. *)
 let unif : problem -> ctxt -> term -> term -> unit = fun pb c a b ->
@@ -263,6 +272,7 @@ and infer : problem -> ctxt -> term -> term * term * bool = fun pb c t ->
   let t, t_ty, cu = infer_aux pb c t in
   if Logger.log_enabled () then
     log "the inferred type of %a\n       is %a" term t term t_ty;
+  Stdlib.(!infer_hook) c t t_ty;
   (t, t_ty, cu)
 
 (** {b NOTE} when unbinding a binder [b] (e.g. when inferring the type of an

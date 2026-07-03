@@ -88,6 +88,9 @@ let tac_solve : popt -> proof_state -> proof_state = fun pos ps ->
   (* try to solve the problem *)
   if not (Unif.solve_noexn p) then
     fatal pos "Unification goals are unsatisfiable.";
+  (* e-graph: drop unsolved constraints it decides, so they never become
+     goals (no-op unless LP_EGRAPH=1). *)
+  Eg_coord.discharge p;
   (* compute the new list of goals by preserving the order of initial goals
      and adding the new goals at the end *)
   let non_instantiated g =

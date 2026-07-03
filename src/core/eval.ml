@@ -984,10 +984,25 @@ let hnf : term reducer = fun ?tags c t ->
 
 let hnf = time_reducer mk_Kind hnf
 
+(** Conversion fallback hook, consulted by {!eq_modulo} ONLY when structural
+    convertibility fails (default [false] ⇒ no effect).  The e-graph coordinator
+    installs a consult here so the extra non-orientable equations (path
+    boundary/η, decided by [when] constraints) can settle conversions the rewriter
+    cannot.  A [Stdlib.ref] (not [Timed]) so installation survives backtracking;
+    consulted here means BOTH [eq_modulo] and [pure_eq_modulo] (hence checking and
+    unification) benefit.  NOT consulted when [?tags] restricts reduction (e.g.
+    the unifier's [`NoRw;`NoExpand] fast pass): such callers deliberately ask a
+    WEAKER question, and answering it modulo the full theory would skip the
+    constraint decomposition that instantiates metavariables. *)
+let conv_hook : (ctxt -> term -> term -> bool) Stdlib.ref =
+  Stdlib.ref (fun _ _ _ -> false)
+
 (** [eq_modulo c a b] tests the convertibility of [a] and [b] in context
     [c]. WARNING: may have side effects in TRef's introduced by whnf. *)
 let eq_modulo : ?tags:rw_tag list -> ctxt -> term -> term -> bool =
-  fun ?tags c -> eq_modulo whnf (Config.make ?tags c)
+  fun ?tags c a b ->
+  eq_modulo whnf (Config.make ?tags c) a b
+  || (match tags with None -> Stdlib.(!conv_hook) c a b | Some _ -> false)
 
 let eq_modulo =
   let open Stdlib in let r = ref false in fun ?tags c t u ->

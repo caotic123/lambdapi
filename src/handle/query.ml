@@ -16,6 +16,8 @@ let infer : Pos.popt -> problem -> ctxt -> term -> term * term =
   | Some (t, a) ->
       if Unif.solve_noexn p then
         begin
+          (* e-graph: drop unsolved constraints it decides (no-op if disabled) *)
+          Eg_coord.discharge p;
           if !p.unsolved = [] then (t, a)
           else
             begin
@@ -38,6 +40,8 @@ let check : Pos.popt -> problem -> ctxt -> term -> term -> term =
   | Some t ->
     if Unif.solve_noexn p then
       begin
+        (* e-graph: drop unsolved constraints it decides (no-op if disabled) *)
+        Eg_coord.discharge p;
         if !p.unsolved = [] then t else
           (List.iter (wrn pos "Cannot solve %a." constr) !p.unsolved;
            die ())
@@ -226,8 +230,12 @@ let handle : Sig_state.t -> proof_state option -> p_query -> result =
       let (u, b) = infer pu.pos p ctxt u in
       (* Check that [t] and [u] have the same type. *)
       p := {!p with to_solve = (ctxt,a,b)::!p.to_solve};
-      if Unif.solve_noexn p then
+      if Unif.solve_noexn p then begin
+        (* e-graph: drop unsolved constraints it decides (no-op if disabled) *)
+        Eg_coord.discharge p;
         if !p.unsolved = [] then begin
+          (* [eq_modulo] itself consults [Eval.conv_hook] (the e-graph) when
+             structural conversion fails. *)
           if Eval.eq_modulo ctxt t u = must_fail then
              fatal pos "Assertion failed."
         end else begin
@@ -235,7 +243,8 @@ let handle : Sig_state.t -> proof_state option -> p_query -> result =
           fatal pos "[%a] has type [%a],@ [%a] has type [%a].@.\
                     Those two types are not unifiable."
             term t term a term u term b
-        end else
+        end
+      end else
           fatal pos "[%a] has type [%a],@ [%a] has type [%a].@.\
                     Those two types are not unifiable."
             term t term a term u term b;

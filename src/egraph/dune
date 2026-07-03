@@ -1,0 +1,4 @@
+(library
+ (name egraph)
+ (public_name lambdapi.egraph)
+ (libraries lambdapi.core lambdapi.common lambdapi.lplib ego))

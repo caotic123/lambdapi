@@ -57,7 +57,10 @@ let rec compile : Command.compiler = fun ss mp ->
         sout "\n%!";*)
       Tactic.reset_admitted();
       let ss = Stdlib.ref (Sig_state.of_sign sign) in
-      let consume cmd = Stdlib.(ss := Command.handle compile !ss cmd) in
+      let consume cmd =
+        Stdlib.(ss := Command.handle compile !ss cmd);
+        Eg_coord.flush sign            (* replay this command's facts (no-op unless LP_EGRAPH=1) *)
+      in
       Debug.stream_iter consume (Parser.parse_file src);
       Console.out 1 (Color.blu "End checking \"%s\"") src;
       Sign.strip_private sign;
