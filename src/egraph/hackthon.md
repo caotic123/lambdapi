@@ -10,6 +10,8 @@ We trigger every time there is a new judgment at Γ.
 The e-graph saturates with the new type constraints and solves modulo rewriting and congruence.
 This is a heavily dangerous feature (non-confluent rules are evil, termination based on these kinds of rules is hell, congruence should be proof-producing, not an oracle, nor should it be at the core) and quickly implemented, but it is curious how nice it was to implement. But there is something cool about having non-confluent rules, they allow to encode type constraints that would be painful without so.
 
+Minimal example of native and computational function extensionality
+
 ```
 // Minimal funext.  Run: LP_EGRAPH=1 lambdapi check examples/funext_min.lp
 
