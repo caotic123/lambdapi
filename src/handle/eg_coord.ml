@@ -1,28 +1,11 @@
-(** E-graph coordinator (handle layer).
-
-    Bridges the dependency-inverted hook in [core] ({!Core.Infer.infer_hook}) to
-    the {!Egraph} library: it RECORDS the typing facts the checker discovers and,
-    after each command has been checked and solved, REPLAYS the GROUND ones into a
-    process-wide e-graph — interning the relation [type(t) = ty] and firing the
-    matching [when] constraints.
-
-    Enabled by the environment variable [LP_EGRAPH=1] (off ⇒ the hook is never
-    installed, so zero overhead).  ONE e-graph for the whole run is sound because
-    variable uids are globally unique within a process (terms from different
-    scopes/files never collide).
-
-    KNOWN LIMITATIONS of this single-global-graph design (the scoped/threaded
-    redesign resolves them WHILE KEEPING subterm firing):
-    - SCOPING: the graph is monotonic and never rolled back, so an equation fired
-      under a local hypothesis that transitively equates two CLOSED terms leaks to
-      later/sibling scopes.  Safe for variable-scoped equations (unique uids) and
-      for the top-level declaration facts we currently exercise.
-    - COST: {!flush} re-scans the whole symbol table and tries every constraint on
-      every recorded subterm each command — O(symbols·commands) + O(subterms·
-      constraints).  Fine for experiments; an incremental feed and head-indexed
-      constraints would make it linear.
-    - GROWTH: {!consult} interns query terms permanently, so the graph grows with
-      transient queries (a concern only for long-lived processes). *)
+(** E-graph coordinator: bridges the core hooks ({!Core.Infer.infer_hook},
+    {!Core.Eval.conv_hook}) to {!Egraph}.  RECORDS typing facts during checking,
+    REPLAYS the ground ones after each command (relate + fire [when]s), and
+    CONSULTS the graph when structural conversion fails.  Gated by [LP_EGRAPH=1]
+    (off ⇒ hooks not installed, zero overhead); one process-wide graph is sound
+    within a run because variable uids never recur.  Known limits: the graph is
+    monotonic (no scoping/rollback), and flush/consult costs are experiment-grade
+    (full symbol rescans, permanent query interning). *)
 
 open Lplib
 open Core
@@ -54,26 +37,20 @@ let graph : Egraph.t = Egraph.create ()
     rolled back by unification backtracking. *)
 let buffer : (ctxt * term * term) list ref = ref []
 
-(** Number of facts in [buffer], and a hard cap.  {!flush} is only wired into
-    [Compile.compile]'s command loop; other drivers (LSP, [Pure], library use)
-    run inference WITHOUT ever flushing, so an uncapped buffer would grow — and
-    pin from GC — every context/term the session ever inferred.  Beyond the cap
-    we stop recording (facts are an optimisation, dropping them is safe). *)
+(** Buffer size + hard cap: drivers that never {!flush} (LSP, [Pure]) must not
+    accumulate unboundedly; beyond the cap we stop recording (safe to drop). *)
 let buffer_len = ref 0
 let max_buffer = 100_000
 
-(** Re-entrancy latch: {!consult} types subterms with {!Infer}, whose own
-    conversion checks re-enter {!Eval.conv_hook}.  While consulting, nested
-    consults answer [false] immediately and {!record} stays quiet (consult-time
-    inferences are not facts about the checked file). *)
+(** Re-entrancy latch: nested {!Eval.conv_hook} entries answer [false] and
+    {!record} stays quiet while consulting. *)
 let in_consult : bool ref = ref false
 
 (** Qualified names of symbols already interned (intern each declaration once). *)
 let seen : Extra.StrSet.t ref = ref Extra.StrSet.empty
 
-(** Recorder installed as {!Core.Infer.infer_hook}: stash references only — terms
-    are mutable and metas resolve in place, so a post-solve replay sees ground
-    forms (those still carrying unsolved metas are dropped by {!is_ground}). *)
+(** Recorder installed as {!Core.Infer.infer_hook}: stash references only —
+    metas resolve in place, so a post-solve replay sees ground forms. *)
 let record : ctxt -> term -> term -> unit =
   fun c t ty ->
   if not !in_consult && !buffer_len < max_buffer then begin
@@ -83,17 +60,11 @@ let record : ctxt -> term -> term -> unit =
 let () = if enabled then Infer.infer_hook := record
 let () = if print_enabled then Egraph.trace := true
 
-(** Groundness — shared with the equation-instantiation check in {!Egraph.fire}:
-    a term with residual holes (unsolved [Meta], [Plac]/[Wild], [Patt]) must not
-    enter the graph. *)
+(** Groundness (shared with {!Egraph.fire}): holes must not enter the graph. *)
 let is_ground : term -> bool = Egraph.is_ground
 
-(** The [when] constraints seen at the last {!flush} — kept so {!consult}'s lazy
-    replay ({!replay_ground}) can fire them mid-command, before the sign is next
-    available. *)
+(** [when] constraints seen at the last {!flush}, for mid-command firing. *)
 let known_constraints : constr_rule list ref = ref []
-
-(* [discharge] is defined below, after [consult]. *)
 
 (** Record [type(tm) = ty] and fire every matching constraint; returns #fires. *)
 let relate_and_fire ctx tm ty constraints =
@@ -102,12 +73,10 @@ let relate_and_fire ctx tm ty constraints =
     (fun n cr -> if Egraph.fire graph ctx cr ~subj:tm ~ty then n + 1 else n)
     0 constraints
 
-(** [replay_ground ()] drains the GROUND buffered facts into the graph (interning
-    [type(t) = ty] and firing the known constraints), keeping the non-ground ones
-    for a later replay (their metas may get solved), and rebuilds if anything was
-    replayed.  Returns [(relations, fires)].  This is what closes the
-    WITHIN-COMMAND timing gap: a conversion in the SAME command that recorded a
-    fact (e.g. an [assert] whose subject was just inferred) can already use it. *)
+(** [replay_ground ()] drains the GROUND buffered facts into the graph (relate +
+    fire), keeping non-ground ones (their metas may still get solved); rebuilds if
+    anything was replayed.  Closes the within-command timing gap: a conversion can
+    use facts recorded earlier in the SAME command. *)
 let replay_ground : unit -> int * int = fun () ->
   if !buffer = [] then (0, 0)
   else begin

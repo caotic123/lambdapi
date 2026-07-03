@@ -13,12 +13,9 @@ let log = log.pp
 (** Exception that may be raised by type inference. *)
 exception NotTypable
 
-(** Hook fired at every {!val:infer} result as [hook ctxt term inferred_type].
-    No-op by default.  The e-graph coordinator (handle layer) installs a recorder
-    here — this INVERTS the dependency so [core] needn't depend on the e-graph
-    library.  It is a [Stdlib.ref] (not [Timed]) so that installing it is NOT
-    undone by unification backtracking; the recorder must only stash references
-    (terms are mutable, metas resolve in place, so a post-solve replay is ground). *)
+(** Hook fired at every {!val:infer} result as [hook ctxt term inferred_type]
+    (no-op by default; installed by the e-graph coordinator — dependency
+    inversion).  [Stdlib.ref], not [Timed]: installation survives backtracking. *)
 let infer_hook : (ctxt -> term -> term -> unit) Stdlib.ref =
   Stdlib.ref (fun _ _ _ -> ())
 

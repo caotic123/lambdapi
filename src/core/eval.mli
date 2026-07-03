@@ -52,10 +52,9 @@ val whnf : ?tags:rw_tag list -> ctxt -> term -> term
     [u] is some whnf of [t] otherwise. *)
 val whnf_opt : ?tags:rw_tag list -> ctxt -> term -> term option
 
-(** Conversion fallback consulted by [eq_modulo] only when structural
-    convertibility fails (default returns [false]).  Installed by the e-graph
-    coordinator to decide the extra non-orientable equations (path boundary/η).
-    A [Stdlib.ref] so installation survives unification backtracking. *)
+(** Conversion fallback consulted by [eq_modulo] when structural convertibility
+    fails and no [?tags] restrict reduction (default [false]; installed by the
+    e-graph coordinator). *)
 val conv_hook : (ctxt -> term -> term -> bool) Stdlib.ref
 
 (** [eq_modulo c a b] tests the convertibility of [a] and [b] in context

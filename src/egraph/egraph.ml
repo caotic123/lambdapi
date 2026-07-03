@@ -1,23 +1,10 @@
-(** Persistent e-graph over {!Repr} (the term LANGUAGE), backed by [ego]
-    ({!Ego.Generic}).
-
-    Lifecycle (driven by [Handle.Eg_coord]):
-      - HOLD one instance across the whole run;
-      - INTERN typing facts as the IN-GRAPH relation [type(t) = ty]
-        ({!relate_type}) and fire the [when] constraints ({!fire});
-      - CONSULT it from conversion to decide class-equivalence
-        ({!equiv}, {!equiv_terms}).
-
-    The EClass analysis is TRIVIAL (no per-class data): we only need congruence
-    closure + manual merges here, not an abstract-interpretation analysis.
-    Typing facts live INSIDE the graph as [$type · t] nodes (see
-    {!type_of_repr}), not in a side table, so congruence propagates them. *)
+(** E-graph over {!Repr}, backed by [ego]: holds typing facts as the in-graph
+    relation [type(t) = ty], fires the [when] constraints as merges, and decides
+    class-equivalence for conversion (driven by [Handle.Eg_coord]). *)
 
 open Core
 
-(** Re-export the term LANGUAGE so consumers can build/inspect nodes as
-    [Egraph.Repr.*].  (Dune hides sibling modules when the main module name
-    matches the library name, so this re-export is needed.) *)
+(* Re-export: dune hides sibling modules when a module matches the lib name. *)
 module Repr = Repr
 
 (** Trivial analysis — unit persistent state, unit per-class data. *)
@@ -48,9 +35,7 @@ end
 (** The concrete e-graph over our language [Repr]. *)
 module EG = Ego.Generic.Make (Repr) (A) (MakeOps)
 
-(** The held e-graph: just ego's read/write graph.  Typing facts are stored
-    INSIDE it as the relation [type(x) = T] (see {!relate_type}), not in a side
-    table — so congruence propagates them: [x ≡ y ⟹ type x ≡ type y]. *)
+(** The held e-graph (ego's read/write graph). *)
 type t = { eg : Ego.Generic.rw EG.t }
 
 (** [create ()] — a fresh empty e-graph; call once per file in [compile.ml]. *)
@@ -58,10 +43,7 @@ let create : unit -> t = fun () -> { eg = EG.init () }
 
 (* ─────────────── tracing: a printable registry of interned terms ─────────── *)
 
-(** When [trace] is on (set by [Handle.Eg_coord] from [LP_EGRAPH_PRINT=1]),
-    every interned term is recorded together with its e-class id, so the graph
-    can be displayed as equivalence classes ({!pp_classes}).  Off by default —
-    the registry costs a rendered string per interned term. *)
+(** [trace] on (LP_EGRAPH_PRINT=1): record interned terms for {!pp_classes}. *)
 let trace : bool Stdlib.ref = Stdlib.ref false
 
 let registry : (Ego.Id.t * string) list Stdlib.ref = Stdlib.ref []
@@ -69,15 +51,11 @@ let registry : (Ego.Id.t * string) list Stdlib.ref = Stdlib.ref []
 let register : Ego.Id.t -> string -> unit = fun id s ->
   if Stdlib.(!trace) then registry := (id, s) :: !registry
 
-(** [add g r] interns a raw {!Repr.t} node and returns its e-class (used to build
-    [type(_)] nodes, and in tests). *)
+(** [add g r] interns a raw node, returning its e-class. *)
 let add : t -> Repr.t -> Ego.Id.t = fun g r -> EG.add_node g.eg r
 
-(** [intern g ctx tm] NORMALISES [tm] (strong nf in context [ctx]) then interns
-    it (de Bruijn-level skolemised under binders, via {!Repr.of_term}), returning
-    its e-class.  Normalising first collapses reduction-equal terms to ONE node,
-    so the e-graph only carries the EXTRA (non-orientable) equations — never what
-    the rewriter already decides. *)
+(** Interning is NORMALISE-first ([Eval.snf]): reduction-equal terms collapse to
+    one node, so the graph only carries the extra non-orientable equations. *)
 let intern_env : t -> Repr.env -> Term.ctxt -> Term.term -> Ego.Id.t =
   fun g env ctx tm ->
   let ntm = Eval.snf ctx tm in
@@ -89,17 +67,13 @@ let intern_env : t -> Repr.env -> Term.ctxt -> Term.term -> Ego.Id.t =
 let intern : t -> Term.ctxt -> Term.term -> Ego.Id.t = fun g ctx tm ->
   intern_env g Repr.empty_env ctx tm
 
-(** [type_of_repr r] is the node [$type · r] — "the type of [r]".  ["$type"] is a
-    reserved head (no real symbol is named it), so it never collides with a user
-    symbol.  (A dedicated [STypeOf] shape constructor would be the collision-proof
-    version, if we keep this representation.) *)
+(** [type_of_repr r] is the node [$type · r]; ["$type"] is a reserved head (no
+    user symbol can be named it). *)
 let type_of_repr : Repr.t -> Repr.t =
   fun r -> Repr.(Mk (SApp (Mk (SSym "$type"), r)))
 
-(** [relate_type g ctx tm ty] — the "insert a type found" hook, as a REWRITE
-    RELATION on types: NORMALISE both [tm] and [ty] (in context [ctx]) and add the
-    in-graph equation [type(tm) = ty].  Congruence then carries it for free — if
-    [tm ≡ tm'] the e-graph identifies [type tm ≡ type tm'], hence their types. *)
+(** [relate_type g ctx tm ty] adds the in-graph equation [type(tm) = ty];
+    congruence then propagates it ([tm ≡ tm' ⟹ type tm ≡ type tm']). *)
 let relate_type : t -> Term.ctxt -> Term.term -> Term.term -> unit =
   fun g ctx tm ty ->
   let ntm   = Eval.snf ctx tm in
@@ -120,26 +94,14 @@ let rebuild : t -> unit = fun g -> EG.rebuild g.eg
 let equiv : t -> Ego.Id.t -> Ego.Id.t -> bool = fun g a b ->
   EG.class_equal (EG.freeze g.eg) a b
 
-(** [equiv_terms g ctx a b] interns [a] and [b] (normalised) and asks whether they
-    land in the SAME e-class — i.e. are equal modulo the equations the graph holds
-    (path boundary/η …) ON TOP of the rewriter.  Querying only ADDS the two nodes
-    (hash-consed onto existing classes), so no {!rebuild} is needed as long as the
-    graph was already rebuilt after its last {!merge}. *)
+(** [equiv_terms g ctx a b]: do [a] and [b] intern into the same e-class?
+    Querying only adds nodes, so no {!rebuild} needed if none is pending. *)
 let equiv_terms : t -> Term.ctxt -> Term.term -> Term.term -> bool =
   fun g ctx a b -> equiv g (intern g ctx a) (intern g ctx b)
 
-(** [pp_classes ppf g] displays the graph as its equivalence classes over all
-    REGISTERED terms (requires {!trace}; classes with a single distinct member
-    are omitted — no equation relates them).  Each class prints as
-
-    {v ──────────────────────────────────────── p
-    ipath (λ i, ⋅ p i)
-    p v}
-
-    with the shortest member as the headline representative.  Typing facts show
-    as [τ(t)] members: a class [τ(p) = PathP …] IS the recorded type constraint
-    on [p].  [~all:true] also shows singleton classes (the WHOLE graph); default
-    keeps only classes an equation actually relates. *)
+(** [pp_classes ppf g] prints the equivalence classes of all registered terms
+    (requires {!trace}), one ruled block per class, shortest member as headline;
+    typing facts appear as [τ(t)] members.  [~all:true] includes singletons. *)
 let pp_classes : ?all:bool -> Format.formatter -> t -> unit =
   fun ?(all = false) ppf g ->
   let fg = EG.freeze g.eg in
@@ -174,11 +136,8 @@ let pp_classes : ?all:bool -> Format.formatter -> t -> unit =
 
 (* ─────────────────── firing `when` typed constraints ─────────────────── *)
 
-(** [is_ground t]: after {!Term.unfold} (which resolves SOLVED metas and [TRef]),
-    does [t] contain no holes?  A leftover [Meta] is UNSOLVED, a [Plac]/[Wild] an
-    unelaborated hole, a [Patt] an uninstantiated schema variable — none may enter
-    the graph.  The single groundness predicate shared by the coordinator (fact
-    replay) and {!fire} (equation instantiation). *)
+(** [is_ground t]: no residual holes after [unfold] — unsolved [Meta],
+    [Plac]/[Wild], uninstantiated [Patt] must not enter the graph. *)
 let rec is_ground : Term.term -> bool = fun t ->
   let open Term in
   match unfold t with
@@ -190,14 +149,8 @@ let rec is_ground : Term.term -> bool = fun t ->
       is_ground a && is_ground d && (let _, b = unbind b in is_ground b)
   | Meta _ | Plac _ | Wild | Patt _ | Bvar _ | TRef _ -> false
 
-(** First-order match of a guard pattern [pat] (schema vars are [Patt(Some i,_,_)])
-    against [t], recording bindings in [subs] (slot [i] ↦ matched subterm); a
-    repeated variable must be [eq_modulo].  Returns whether it matched.
-
-    Only the first-order spine is handled — enough for type guards like
-    [Path a x y] / [PathP H x y], where the schema vars sit at argument
-    positions.  A [Patt] occurring UNDER a binder (needing its arguments
-    abstracted) is not supported here. *)
+(** First-order match of a guard pattern against [t], binding schema vars in
+    [subs].  Spine-level only: a [Patt] under a binder is unsupported. *)
 let rec match_guard
     (subs : Term.term option array) (pat : Term.term) (t : Term.term) : bool =
   let open Term in
@@ -285,16 +238,12 @@ let fire_all :
   = fun g ctx crs ~subj ~ty ->
   List.iter (fun cr -> ignore (fire g ctx cr ~subj ~ty)) crs
 
-(** [saturate g ctx crs tm] — the e-graph "lives inside the binders": walk the
-    (normalised) term and, at EVERY subterm whose type is cheaply synthesizable
-    (bound variables — read from the binder domain — and neutral application
-    spines — head's declared type with the arguments substituted through the
-    Π's), fire the [when] constraints, interning the equations AT THAT POINT'S
-    env.  So under [λ x] with [h x : Path A x x], the boundary equation
-    [h x ⋅ i0 ≡ x] enters the graph keyed on [x]'s de Bruijn index — and pure
-    CONGRUENCE then decides e.g. [P (λ x, h x ⋅ i0) ≡ P (λ x, x)] with a single
-    class query: the bodies collapse, so the [λ]s collapse, so the [P …]s do.
-    No type inference machinery: heads whose type isn't declared are skipped. *)
+(** [saturate g ctx crs tm]: walk the normalised term and fire the [when]
+    constraints on every subterm whose type is cheaply synthesizable (bound vars
+    from binder domains; neutral spines from the head's declared type), interning
+    equations at each occurrence's env — so facts fired under a binder key the
+    bound variable exactly as its occurrences do, and congruence alone then
+    decides conversions under λ.  No Infer; unknown heads are skipped. *)
 let saturate : t -> Term.ctxt -> Term.constr_rule list -> Term.term -> unit =
   fun g ctx crs tm ->
   if crs = [] then () else

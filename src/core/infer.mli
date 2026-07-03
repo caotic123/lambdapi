@@ -2,11 +2,8 @@
 
 open Term
 
-(** Hook fired at every [infer] result as [hook ctxt term inferred_type] (no-op by
-    default).  Installed by the e-graph coordinator to RECORD typing facts; kept
-    here to invert the dependency (core must not depend on the e-graph library).
-    A [Stdlib.ref] so installing it survives unification backtracking — the
-    installed recorder must only stash references (metas resolve in place). *)
+(** Hook fired at every [infer] result as [hook ctxt term inferred_type]
+    (no-op by default; installed by the e-graph coordinator). *)
 val infer_hook : (ctxt -> term -> term -> unit) Stdlib.ref
 
 (** [infer_noexn p ctx t] returns [Some(t',a)] where [t'] is a refinement of

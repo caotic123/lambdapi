@@ -1,40 +1,11 @@
-(** {1 E-graph representation of Lambdapi terms — bridge to the [ego] library.}
-
-    PURPOSE.  The SATURATING fragment of the [when] mechanism — the additional
-    type constraints whose equations are non-orientable and mutually triggering
-    (path-η as a merge, overlap-agreement; cf. [sketch_simple.context] and the
-    design notes in [src/core/eval.ml:134-174]) — needs an equivalence-class
-    structure, not just rewriting.  We host it on [ego] (OCaml e-graphs).
-
-    This module is the BRIDGE.  It defines:
-      - {!type:shape}, the e-graph LANGUAGE (the node "shape" ego is instantiated
-        with), as a first-order-ised mirror of {!type:Core.Term.term} — the
-        S-prefix on constructors avoids collisions with [Term]'s under
-        [open Term]; and
-      - {!val:of_term}, the translation [term -> Repr.t node tree] (interned by
-        {!Egraph.add}).
-
-    SCOPE: term <-> node only.  The graph instance, the [when] firing, and the
-    hooks into inference/conversion live in {!Egraph} / [Handle.Eg_coord].
-
-    DESIGN RECAP (why the translation looks the way it does):
-      - GROUND congruence closure: descending under a binder, the bound variable
-        is SKOLEMIZED to a fresh constant keyed by its de Bruijn INDEX, so that
-        α-equivalent binders intern to the SAME node — and the same closed subterm
-        interns identically at any depth (both necessary for congruence).
-      - Guards/endpoints come from TYPES (typed-conversion-on-trigger,
-        eval.ml:112-125), so every equation entering the graph is ground/closed.
-*)
+(** E-graph LANGUAGE for Lambdapi terms: the node [shape] ego is instantiated
+    with (a first-order mirror of {!type:Core.Term.term}; the S-prefix avoids
+    constructor collisions under [open Term]) and the translation {!of_term}.
+    The graph instance and the [when]-firing live in {!Egraph}. *)
 
 open Core
 open Term
 
-(** E-class ids are [Ego.Id.t]; they live in {!module:Egraph}, which instantiates
-    ego's [Generic.Make] over THIS module (used as the [LANGUAGE]).  Here we stay
-    pure: the term LANGUAGE — [shape] / [op] / [t] — plus [of_term]. *)
-
-(* ───────────────────────────────────────────────────────────────────────── *)
-(** {2 Keys — stable identities for leaf nodes.} *)
 type sym_key = string
 
 type meta_key = int
@@ -50,41 +21,9 @@ type op =
   | OMeta of meta_key
   | OPatt of int
 
-(* ───────────────────────────────────────────────────────────────────────── *)
-(** {2 The e-graph LANGUAGE — the node "shape".}
-
-    An e-node is an operator applied to CHILDREN, each child being an e-class id.
-    Following egg/ego, the shape is parameterised by the child type ['a] (= {!id}
-    in the live graph).  This is the type ego's [LANGUAGE] functor is built over.
-
-    Constructors are S-PREFIXED so they don't collide with {!module:Core.Term}'s
-    constructors (which are in scope via [open Term]).
-
-    CASES (a first-order mirror of {!type:Core.Term.term}):
-    {ul
-     {- [SType], [SKind]      — sort leaves (Term.Type / Term.Kind).}
-     {- [SSym k]              — a symbol head, a 0-ary leaf (Term.Symb).
-                                Arguments arrive via [SApp], NOT here.}
-     {- [SVar k]              — free var / skolem leaf (Term.Vari, and the
-                                de Bruijn skolem standing for a Term.Bvar).}
-     {- [SApp (f, x)]         — application (Term.Appl).  Spines [f x y] become
-                                nested [SApp(SApp(f,x),y)], as in [term].}
-     {- [SProd (a, b)]        — Π-type (Term.Prod): [a] domain, [b] BODY interned
-                                under a fresh skolem.}
-     {- [SAbst (a, b)]        — λ (Term.Abst): same shape as [SProd].}
-     {- [SLet (a, t, b)]      — let (Term.LLet): type, definition, body(skolem).}
-     {- [SMeta (m, args)]     — metavariable application (Term.Meta).  Carries the
-                                §7c fragment: terms under metavariables.}
-     {- [SPatt (i, args)]     — SCHEMA / pattern variable (Term.Patt).  Appears
-                                ONLY when interning a CONSTRAINT's equations
-                                ([cr_eqns]); [i] is the slot bound by guard-match.
-                                Unreachable on GROUND subjects.}}
-
-    Term constructors with NO shape (eliminate before interning — see [of_term]):
-      - [Bvar]        : consumed by the [Prod]/[Abst]/[Let] descent.
-      - [TRef]        : follow the ref via [Term.unfold] first.
-      - [Wild],[Plac] : holes; must not reach the ground graph.
-*)
+(** An e-node: an operator applied to children (e-class ids ['a]).  [SPatt]
+    appears only in constraint equations, never in ground subjects; [Bvar]/
+    [TRef]/[Wild]/[Plac] have no shape and are eliminated before interning. *)
 type 'a shape =
   | SType
   | SKind
@@ -97,12 +36,10 @@ type 'a shape =
   | SMeta of meta_key * 'a list
   | SPatt of int * 'a list
 
-(** Concrete terms of the LANGUAGE, "tying the knot" (ego's [LANGUAGE.t]).
-    [of_term] produces these; [Egraph.intern] feeds them to ego's [add_node]. *)
+(** Concrete node trees (ego's [LANGUAGE.t]). *)
 type t = Mk of t shape [@@unboxed]
 
-(** {3 Structural ops ego's [LANGUAGE] functor expects.}  Provided complete —
-    purely mechanical over {!type:shape}.  (Adapt names to your [ego] version.) *)
+(* Structural ops required by ego's [LANGUAGE] functor. *)
 
 (** The children (e-class ids) of a node, left to right. *)
 let children : 'a shape -> 'a list = function
@@ -205,25 +142,14 @@ let pp_shape :
   | SMeta (m, xs) -> Format.fprintf ppf "Meta(%d, [%a])" m pl xs
   | SPatt (i, xs) -> Format.fprintf ppf "Patt(%d, [%a])" i pl xs
 
-(* ───────────────────────────────────────────────────────────────────────── *)
-(** {2 [of_term] — intern a term into the e-graph.  THE function to implement.}
-
-    Folds a (ground, after skolemization) term into the graph and returns its
-    e-class id.  [add] is ego's "insert this node, return its class" primitive
-    (e.g. a partial application of [EGraph.add_node]); kept abstract so you bind
-    it to your [ego] version.  [env] carries the binder depth for skolem levels.
-
-    Always match on [unfold t], not [t], to transparently skip [TRef],
-    instantiated [Meta]s, and [LLet] introduced by evaluation sharing.
-
-    Call as [of_term empty_env t]. Bound variables are keyed by their de Bruijn
-    INDEX (depth-relative) so that α-equivalent binders intern identically AND the
-    same closed subterm interns identically at any depth — both needed for
-    congruence. *)
+(** [of_term env t] translates [t] into a node tree.  Matches on [unfold t]
+    (skips [TRef]/solved metas); bound variables are keyed by de Bruijn INDEX
+    so α-equivalent binders — and the same closed subterm at any depth —
+    intern identically (both required for congruence). *)
 
 type env = {
-  depth : int;          (** binders entered so far = next de Bruijn LEVEL *)
-  lvl   : int VarMap.t; (** bound var ↦ the LEVEL (env.depth) at its binder *)
+  depth : int;          (** binders entered so far *)
+  lvl   : int VarMap.t; (** bound var ↦ the level (env.depth) at its binder *)
 }
 
 let empty_env : env = { depth = 0; lvl = VarMap.empty }
@@ -274,14 +200,3 @@ let rec of_term (env : env) (tm : term) : t =
   | Wild | Plac _ ->
       (* holes — must not reach the ground e-graph. *)
       failwith "INVALID: Wild/Plac in e-graph term"
-   
-
-(* ───────────────────────────────────────────────────────────────────────── *)
-(** {2 Reverse direction (sketch only — for reading classes back into terms).}
-
-    Conversion uses the graph to DECIDE [a ≡ b] (same class?), so you mostly
-    query, not read back.  If you ever need a witness term from a class, invert
-    [of_term]: pick a representative node per class and rebuild, turning
-    [Skolem level] back into the binder's bound variable.  Left unimplemented. *)
-(* let rec to_term : (id -> id shape) -> id -> term = fun _repr _c ->
-     failwith "TODO (optional): rebuild a term from an e-class representative" *)
