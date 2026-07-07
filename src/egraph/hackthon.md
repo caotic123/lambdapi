@@ -1,4 +1,8 @@
-This experiments type constraints and how could be propagated by a non-confluent e-graph structure
+# Type constraints through an e-graph
+
+This is a small experiment: let the type checker learn equations from typing
+judgments — not only from rewrite rules — and decide conversion with an
+e-graph (congruence closure) on top of ordinary rewriting.
 
 ```
 when ⋅ $p : T                               // boundary (e-graph)
@@ -6,30 +10,81 @@ when ⋅ $p : T                               // boundary (e-graph)
    ⊢ ...
 ```
 
-We trigger every time there is a new judgment at Γ.
-The e-graph saturates with the new type constraints and solves modulo rewriting and congruence.
-This is a heavily dangerous feature (non-confluent rules are evil, termination based on these kinds of rules is hell, congruence should be proof-producing, not an oracle, nor should it be at the core) and quickly implemented, but it is curious how nice it was to implement. But there is something cool about having non-confluent rules, they allow to encode type constraints that would be painful without so.
+Every time the checker derives a judgment whose type matches the guard, the
+listed equations are merged into the graph, unoriented.  Conversion first
+normalises as usual; when that is not enough, it asks the graph whether the
+two sides ended up in the same class.
 
-Since `when` equations are ASSERTED (merged), never checked, soundness demands
-that canonical paths cannot lie about their endpoints: `ipath` pins them to the
-faces of its body, `ipath F : PathP H (F i0) (F i1)`, exactly as in the cubical
-typing rule for `⟨i⟩ t`.  (An endpoint-agnostic `ipath : … → PathP H x y` lets
-`rule bogus ↪ @ipath _ u v (λ _, u)` pass subject reduction, after which the
-boundary fire merges `u ≡ v` — conversion collapses.)  Two pieces make the
-strong constructor livable:
+A word of caution before the fun: this is a dangerous toy.  Non-confluent
+rules are evil, termination arguments around them are hell, and a congruence
+oracle should really produce proofs rather than be trusted at the core.  It
+was, however, surprisingly pleasant to build — and there is something cool
+here: unoriented equations can express type constraints that rules alone
+cannot.
 
-- rule subject-reduction offers its residual goals to the graph
-  (`Tool.Sr.unsolved_hook`, installed by `Handle.Eg_coord`): the SR goals of
-  `funext $h ↪ ⟨i⟩ λ x, $h x ⋅ i` are `f ≡ λ x, ($h x) ⋅ i0` (and `i1`) with
-  `$h` already a fresh ground symbol — precisely the `when` boundary equations;
-- the consult η-ALIGNS a bare function against an abstraction
-  (`f` vs `λ x, t` becomes `λ x, f x` vs `λ x, t`) since the graph itself is
-  snf-first structural congruence, with no η.
+## Keeping it sound
 
-A forged-endpoint rule still dies in SR (`Cannot solve u ≡ v`): the graph has
-no equation merging distinct constants, so the hook cannot discharge it.
+`when` equations are asserted, never checked.  So the constructors must make
+them true on canonical forms.  For paths this means `ipath` cannot lie about
+its endpoints: they are pinned to the faces of its body,
 
-Minimal example of native and computational function extensionality
+```
+ipath F : PathP H (F i0) (F i1)
+```
+
+exactly the cubical typing rule for `⟨i⟩ t`.  (With an endpoint-agnostic
+`ipath : … → PathP H x y`, one bogus rule is enough to merge two distinct
+constants — and conversion collapses.)  Two things make the honest
+constructor comfortable to use:
+
+- when checking that a rule preserves typing gets stuck on a goal, the goal
+  is offered to the graph — for `funext` those goals are precisely the
+  boundary equations;
+- the graph has no η of its own, so when a bare function meets an
+  abstraction (`f` against `λ x, t`) the function is η-expanded first
+  (`λ x, f x`), and congruence on the bodies does the rest.
+
+A rule that forges its endpoints still dies with `Cannot solve u ≡ v`:
+nothing in the graph merges two distinct constants, so there is no way to
+discharge it.
+
+## Warm-up: η-laws (`examples/eta_min.lp`)
+
+The simplest type-directed equalities, well below paths.
+
+Unit-η — `u ≡ tt` for every `u : Unit` — cannot even be written as a rule:
+its left-hand side would be a bare variable.  On a neutral `u` there is no
+syntax to match; only the type knows.
+
+Surjective pairing — `pair (fst p) (snd p) ≡ p` — can be written as a rule,
+but a treacherous one: it fires only while its two copies of `p` are
+literally the same term, and any step inside one copy breaks the match.  All
+its critical pairs join, so the danger is invisible locally — yet λ-calculus
+plus surjective pairing is famously not confluent (Klop 1980): with β and
+fixpoints, the race to re-equalise the two copies can be made endless.  As
+unoriented `when` equations, each law is one line:
+
+```
+when Unit $u : Unit ⊢ $u ≡ tt;
+when σ    $p : σ    ⊢ pair (fst $p) (snd $p) ≡ $p;
+```
+
+The payoff is definitional laws on neutral terms, where rewriting is stuck.
+With `rule swap $p ↪ pair (snd $p) (fst $p)`, the term `swap (swap p)`
+rewrites to `pair (fst p) (snd p)` and stops — yet `swap (swap p) ≡ p`
+holds, because `p`'s judgment fired the merge and both reducts share a
+class.  And the graph goes strictly beyond any rule on mixed instances: if
+`u ≈ v` holds only in the graph (both merge with `tt`), then
+`pair (fst (k u)) (snd (k v)) ≡ k u` follows by congruence through
+`k u ≈ k v`, while a rewrite could never fire — the two arguments never
+become the same term.
+
+Same anatomy as paths, one level down: the projections play path-β (oriented
+computation), the `when` plays the boundary (unoriented type constraint),
+and on a canonical `pair x y` the equation is already true by computation,
+so only neutrals gain anything new.
+
+## Minimal example of native and computational function extensionality
 
 ```
 // Minimal funext.  Run: LP_EGRAPH=1 lambdapi check examples/funext_min.lp
@@ -74,61 +129,32 @@ assert ⊢ (funext h) ⋅ i0 ≡ f;                              // face i0: e-g
 assert ⊢ (funext h) ⋅ i1 ≡ g;                              // face i1
 ```
 
-## Typing derivation of the `funext` rule
+## The `funext` rule, e-graph action only
 
-Subject reduction must show the RHS inhabits the LHS type.  Abbreviations:
-`Ĥ ≔ λ i, pi A (λ x, B x i)` (the line of function types), `h̄` the fresh
-symbol SR substitutes for the pattern variable `$h` (printed `$1`),
-`F ≔ λ (i : I) (x : El A), (h̄ x) ⋅ i` (the RHS path body), and
-`Γ ≔ i : I, x : El A`.  `≡` is conversion (β + rewrite rules), `≈` an
-e-class equality in the graph.
-
-The LHS types as `funext h̄ : PathP Ĥ f g` — the type the RHS must match.
-
-`𝒟_F` — the path body (pure `Infer`, no e-graph):
+Typing the RHS `⟨i⟩ λx. h x · i` is routine; what matters is what it leaves
+behind.  The inferred type meets the expected one:
 
 ```
-  h̄ : Π (x : El A), PathP (B x) (f x) (g x)        x ∈ Γ
-  ──────────────────────────────────────────────────────── app
-  Γ ⊢ h̄ x : PathP (B x) (f x) (g x)                            i ∈ Γ
-  ─────────────────────────────────────────────────────────────────── app-⋅  [H ≔ B x, x ≔ f x, y ≔ g x]
-  Γ ⊢ (h̄ x) ⋅ i : El (B x i)
-  ──────────────────────────────────────────────────────── abst
-  i : I ⊢ λ x, (h̄ x) ⋅ i : Π (x : El A), El (B x i)
-  ════════════════════════════════════════════════════════ conv:  El (Ĥ i) ↪β El (pi A (λ x, B x i)) ↪El-pi Π (x : El A), El (B x i)
-  i : I ⊢ λ x, (h̄ x) ⋅ i : El (Ĥ i)
-  ──────────────────────────────────────────────────────── abst
-  ⊢ F : Π (i : I), El (Ĥ i)
+  inferred:  PathP _ (λx. h x · i0) (λx. h x · i1)
+  expected:  PathP _ f g
+             ────────────────────────────────────── PathP injective
+             G0:  λx. h x · i0 ≡ f
+             G1:  λx. h x · i1 ≡ g        (stuck: no rule rewrites either side)
 ```
 
-Root — the RHS against the LHS type:
+The graph closes `G0` from one leaf — the judgment `h x : PathP (B x) (f x) (g x)`:
 
 ```
-                    𝒟_F
-  ─────────────────────────────────── ipath  [H ≔ Ĥ]
-  ⊢ ipath F : PathP Ĥ (F i0) (F i1)
-  ═══════════════════════════════════ conv, PathP injective
-  ⊢ ipath F : PathP Ĥ f g             residual goals:   G₀ : F i0 ≡ f     G₁ : F i1 ≡ g
+  h x : PathP (B x) (f x) (g x)
+  ─────────────────────────────  when (boundary)
+       h x · i0  ≈  f x
+  ─────────────────────────────  congruence (λ-bodies)
+   λx. h x · i0  ≈  λx. f x         λx. f x  ≈  f   (η)
+  ──────────────────────────────────────────────────────
+              λx. h x · i0  ≈  f                          G0 ✓
 ```
 
-Unification cannot solve `G₀`/`G₁` — β only reaches `F i0 ↪ λ x, (h̄ x) ⋅ i0`,
-and nothing rewrites that to `f`.  `Sr.check_rule` hands them to the graph
-(`Tool.Sr.unsolved_hook` → `Eg_coord.consult`), which closes them:
-
-```
-  Γ ⊢ h̄ x : PathP (B x) (f x) (g x)                        ⌐ subject synthesized by saturate,
-  ─────────────────────────────────── when (boundary fire)  ¦ UNDER the binder, equations keyed
-  E₀ : (h̄ x) ⋅ i0 ≈ f x                                    ¦ at the occurrence's de Bruijn env
-  ─────────────────────────────────── congruence (Abst over equal body classes)
-  λ x, (h̄ x) ⋅ i0 ≈ λ x, f x            f ≈ λ x, f x   (η-align)
-  ────────────────────────────────────────────────────────────── transitivity
-  λ x, (h̄ x) ⋅ i0 ≈ f                                       ⟹ G₀ discharged   ∎
-```
-
-`G₁` is symmetric via `E₁ : (h̄ x) ⋅ i1 ≈ g x`.  Machinery map: `app`/`abst`/
-`conv` are `Core.Infer`; the residual goals are parked by `Core.Unif` and
-collected in `Tool.Sr.check_rule`; the boundary fire is `Egraph.saturate`/
-`fire`; η-alignment is `Eg_coord.eta_align`; the final step is ego's
-congruence closure.  The face asserts (`(funext h) ⋅ i0 ≡ f`) discharge by the
-SAME tree with the declared `h` in place of `h̄`, after `funext h ⋅ i0` reduces
-to `λ x, (h x) ⋅ i0` by the rule + path-β.
+`G1` is the same tree with `i1`/`g`.  Three moves, always in this order:
+a `when` fire on a judgment, congruence to lift it through the binder,
+η to meet the bare function.  The face asserts (`funext h · i0 ≡ f`)
+replay the identical tree after `funext h · i0` reduces to `λx. h x · i0`.
