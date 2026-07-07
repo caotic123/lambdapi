@@ -3,6 +3,12 @@
 open Core open Term
 open Common
 
+(** Conversion fallback consulted on the constraints that unification leaves
+    unsolved during {!check_rule}, before declaring a type-preservation
+    failure.  Installed by the e-graph coordinator under [LP_EGRAPH=1]; the
+    default accepts nothing. *)
+val unsolved_hook : (ctxt -> term -> term -> bool) Stdlib.ref
+
 (** [check_rule r] checks whether the pre-rule [r] is well-typed in
    signature state [ss] and then construct the corresponding rule. Note that
    [Fatal] is raised in case of error. *)

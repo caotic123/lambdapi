@@ -15,11 +15,10 @@ injective symbol PathP : Π (H : I → U), El (H i0) → El (H i1) → TYPE;
 symbol ⋅ : Π [H : I → U] [x : El (H i0)] [y : El (H i1)],
            PathP H x y → Π (e : I), El (H e);
 notation ⋅ infix 10;
-symbol ipath : Π [H : I → U] [x : El (H i0)] [y : El (H i1)],
-               (Π (i : I), El (H i)) → PathP H x y;
+symbol ipath : Π [H : I → U] (F : Π (i : I), El (H i)), PathP H (F i0) (F i1);
 notation ipath quantifier;
 
-rule @⋅ _ _ _ (@ipath _ _ _ $F) $e ↪ $F $e;               // path-β
+rule @⋅ _ _ _ (@ipath _ $F) $e ↪ $F $e;                   // path-β
 
 when ⋅ $p : PathP $H $x $y                                 // boundary (e-graph)
    ⊢ @⋅ $H $x $y $p i0 ≡ $x

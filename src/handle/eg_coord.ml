@@ -95,15 +95,33 @@ let replay_ground : unit -> int * int = fun () ->
     end
   end
 
+(** [eta_align ctx a b]: when exactly one of the (normalised) sides is an
+    abstraction, η-expand the other — [f] vs [λ x, t] becomes [λ x, f x] vs
+    [λ x, t] — so that congruence on the BODIES can decide the pair: the graph
+    itself has no η (interning is snf-first and structural).  Top-level only,
+    which is what the cubical goals need ([f ≡ λ x, p x ⋅ ε], the residual of
+    a rule against a boundary-respecting constructor); the expansion is
+    restricted to neutral shapes so no ill-typed [λ x, Type x] is built. *)
+let eta_align : ctxt -> term -> term -> term * term = fun ctx a b ->
+  let a = Eval.snf ctx a and b = Eval.snf ctx b in
+  let expand dom t =
+    let x = new_var "x" in
+    mk_Abst (dom, bind_var x (mk_Appl (t, mk_Vari x)))
+  in
+  match unfold a, unfold b with
+  | Abst (dom, _), (Vari _ | Symb _ | Appl _) -> a, expand dom b
+  | (Vari _ | Symb _ | Appl _), Abst (dom, _) -> expand dom a, b
+  | _ -> a, b
+
 (** [consult ctx a b]: are [a] and [b] equal modulo the e-graph's equations?  The
     structural-conversion FALLBACK installed as {!Eval.conv_hook} (thus reached
     only AFTER structural conversion failed).  Flat, no recursion: replay the
-    pending ground facts, SATURATE both terms ({!Egraph.saturate} fires the
-    [when] constraints on every typed subterm, INSIDE binders, with equations
-    keyed at each occurrence's env), then ask for a single class equality —
-    CONGRUENCE propagates the merged bodies up through binders and application
-    heads, so nested positions need no explicit descent.
-    No-op ([false]) unless {!enabled}. *)
+    pending ground facts, η-ALIGN the two sides ({!eta_align}), SATURATE both
+    terms ({!Egraph.saturate} fires the [when] constraints on every typed
+    subterm, INSIDE binders, with equations keyed at each occurrence's env),
+    then ask for a single class equality — CONGRUENCE propagates the merged
+    bodies up through binders and application heads, so nested positions need
+    no explicit descent.  No-op ([false]) unless {!enabled}. *)
 let consult : ctxt -> term -> term -> bool =
   fun ctx a b ->
   (* An interning error (e.g. a residual hole reaching [of_term]) must not abort
@@ -122,19 +140,43 @@ let consult : ctxt -> term -> term -> bool =
     Fun.protect ~finally:(fun () -> in_consult := false) @@ fun () ->
     try
       ignore (replay_ground ());
+      let a, b = eta_align ctx a b in
       Egraph.saturate graph ctx !known_constraints a;
       Egraph.saturate graph ctx !known_constraints b;
       Egraph.rebuild graph;
-      Egraph.equiv_terms graph ctx a b
+      let ok = Egraph.equiv_terms graph ctx a b in
+      if print_enabled then
+        Format.eprintf "[egraph] consult %a ≡ %a → %b@."
+          Print.term a Print.term b ok;
+      ok
     with
     | Stack_overflow | Out_of_memory | Sys.Break as e -> raise e
-    | _ -> false
+    | e ->
+      if print_enabled then
+        Format.eprintf "[egraph] consult raised %s@." (Printexc.to_string e);
+      false
   end
 
 (* Consult the e-graph from the type-checker's conversion (checking + unification),
    not just from asserts.  Only when structural [eq_modulo] already failed, so it
    can only make MORE things convertible — the cubical path/η equations. *)
 let () = if enabled then Eval.conv_hook := consult
+
+(* Rule type-preservation ({!Tool.Sr.check_rule}) parks its residual goals
+   outside the unifier, with LHS pattern variables already turned into fresh
+   ground symbols: offer those goals to the graph too.  This is what lets a
+   boundary-respecting constructor coexist with rules whose SR goals ARE the
+   [when] boundary equations — e.g. [funext $h ↪ ⟨i⟩ λ x, $h x ⋅ i] against
+   [ipath F : PathP H (F i0) (F i1)]. *)
+let () =
+  if enabled then
+    Tool.Sr.unsolved_hook :=
+      fun c a b ->
+        let ok = consult c a b in
+        if ok && print_enabled then
+          Format.eprintf "[egraph] SR-discharged %a ≡ %a@."
+            Print.term a Print.term b;
+        ok
 
 (** [discharge p] drops from [p]'s UNSOLVED constraints those the e-graph
     decides.  The unifier parks some conversion goals through paths that never

@@ -9,6 +9,15 @@ open Core open Term open Print
 let log_subj = Logger.make 's' "subj" "subject-reduction"
 let log_subj = log_subj.pp
 
+(** Conversion fallback consulted on each constraint that unification leaves
+    unsolved, before declaring a type-preservation failure.  By that point the
+    LHS pattern variables have been replaced by fresh (ground) symbols, so an
+    equational decision procedure can handle the residual goals.  Installed by
+    the e-graph coordinator (Handle.Eg_coord) under [LP_EGRAPH=1]; the default
+    accepts nothing. *)
+let unsolved_hook : (ctxt -> term -> term -> bool) Stdlib.ref =
+  Stdlib.ref (fun _ _ _ -> false)
+
 (** [build_meta_type p k] builds the type “Πx1:A1,⋯,xk:Ak,A(k+1)” where the
    type “Ai = Mi[x1,⋯,x(i-1)]” is defined as the metavariable “Mi” which has
    arity “i-1” and type “Π(x1:A1) ⋯ (x(i-1):A(i-1)), TYPE”, and adds the
@@ -237,6 +246,11 @@ let check_rule : Pos.popt -> sym_rule -> sym_rule =
   in
   let is_lhs_constr rc = List.exists (fun lc -> is_inst lc rc) lhs_constrs in
   let cs = List.filter (fun rc -> not (is_lhs_constr rc)) rhs_constrs in
+  (* Residual goals may hold for reasons unification cannot see (e.g. the
+     cubical boundary equations of a [when] constraint): offer them to the
+     installed hook before failing. *)
+  let cs =
+    List.filter (fun (c,t,u) -> not (Stdlib.(!unsolved_hook) c t u)) cs in
   if Logger.log_enabled () then
     log_subj "rule after checking that the RHS has the same type:@ %a ↪ %a"
       term lhs_with_metas term rhs_with_metas;
