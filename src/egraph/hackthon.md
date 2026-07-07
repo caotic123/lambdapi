@@ -56,7 +56,7 @@ Unit-η — `u ≡ tt` for every `u : Unit` — cannot even be written as a rule
 its left-hand side would be a bare variable.  On a neutral `u` there is no
 syntax to match; only the type knows.
 
-Surjective pairing — `pair (fst p) (snd p) ≡ p` — can be written as a rule,
+Surjective pairing, `pair (fst p) (snd p) ≡ p`, can be written as a rule,
 but a treacherous one: it fires only while its two copies of `p` are
 literally the same term, and any step inside one copy breaks the match.  All
 its critical pairs join, so the danger is invisible locally — yet λ-calculus
