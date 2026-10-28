@@ -26,6 +26,14 @@ type config =
   ; symb_ex  : sym (** Exists(∃) symbol. *)
   ; symb_all : sym (** Forall(∀) symbol. *) }
 
+(** Result of a prover call. *)
+type output_solver =
+  | Proof of string (** Valid, with a complete proof (Alethe for CVC5). *)
+  | Invalid of string (** No proof found. *)
+  | Holey
+  (** Valid, but without a complete proof: no proof was asked for, or the
+      proof could not be read, or it has steps justified by "hole". *)
+
 (** [get_config ss pos] build the configuration using [ss]. *)
 let get_config : Sig_state.t -> Pos.popt -> config = fun ss pos ->
   let builtin = Builtin.get ss pos [] in
@@ -50,6 +58,16 @@ let default_prover : string ref = ref "Alt-Ergo"
 (** [timeout] is the current time limit (in seconds) for a Why3 prover to find
     a proof. It can be changed with "set prover <int>". *)
 let timeout : int ref = ref 2
+
+(** [smt_proofs] tells whether provers are asked for a proof (experimental,
+    only CVC5 for now). It is set by "lambdapi check
+    --experimental-smt-proofs". *)
+let smt_proofs : bool ref = ref false
+
+(** Options added to the CVC5 command when [!smt_proofs] holds: print the
+    proof in the Alethe format, with the pivots of resolution steps. *)
+let cvc5_proof_options =
+  "--dump-proofs --proof-format-mode=alethe --proof-alethe-res-pivots"
 
 (** [why3_config] is the Why3 configuration read from the configuration file
    (["~/.why3.conf"] usually). For more information, visit the Why3
@@ -412,8 +430,9 @@ let translate_goal :
   if Logger.log_enabled() then log "%a" Why3.Pretty.print_task tsk;
   tsk
 
-(** [run tsk pos prover_name] sends [tsk] to [prover_name]. *)
-let run : Why3.Task.task -> Pos.popt -> string -> bool =
+(** [run tsk pos prover_name] sends [tsk] to [prover_name]. If [!smt_proofs]
+    holds and the prover is CVC5, the prover is also asked for a proof. *)
+let run : Why3.Task.task -> Pos.popt -> string -> output_solver =
   fun tsk pos prover_name ->
   (* Filter the set of why3 provers. *)
   let filter = Why3.Whyconf.parse_filter_prover prover_name in
@@ -444,19 +463,28 @@ let run : Why3.Task.task -> Pos.popt -> string -> bool =
     with e -> fatal pos "Failed to load driver for \"%s\": %a"
                 prover.prover.prover_name Why3.Exn_printer.exn_printer e
   in
+  (* Ask for a proof if required and supported. *)
+  let with_proof =
+    !smt_proofs && String.lowercase_ascii prover.prover.prover_name = "cvc5"
+  in
   (* Actually run the prover. *)
-  let command = prover.Why3.Whyconf.command
+  let command = prover.Why3.Whyconf.command in
+  let command =
+    if with_proof then command ^ " " ^ cvc5_proof_options else command
   and limits = {Why3.Call_provers.empty_limits
               with limit_time = float_of_int !timeout} in
   let call =
     Why3.Driver.prove_task ~command ~config:why3_main ~limits driver tsk in
-  Why3.Call_provers.((wait_on_call call).pr_answer = Valid)
+  let res = Why3.Call_provers.wait_on_call call in
+  if res.pr_answer <> Why3.Call_provers.Valid then Invalid prover.prover.prover_name
+  else if not with_proof then Holey
+  else Proof res.pr_output
 
 (** [handle ss pos prover_name gt] runs the Why3 prover corresponding to
     [prover_name] (if given or a default one otherwise) on the goal type [gt],
     and fails if no proof is found. *)
 let handle :
-  Sig_state.t -> Pos.popt -> string option -> goal_typ -> unit =
+  Sig_state.t -> Pos.popt -> string option -> goal_typ -> output_solver =
   fun ss pos prover_name
       ({goal_meta = _; goal_hyps = hyps; goal_type = t} as gt) ->
   let g = Typ gt in
@@ -467,5 +495,9 @@ let handle :
   let prover_name = Option.get !default_prover prover_name in
   if Logger.log_enabled() then log "running with prover \"%s\"" prover_name;
   (* Run the task with the prover named [prover_name]. *)
-  if not (run tsk pos prover_name) then
-    fatal pos "\"%s\" did not find a proof" prover_name
+  run tsk pos prover_name
+  
+  (*match run tsk pos prover_name with
+  | Invalid -> fatal pos "\"%s\" did not find a proof" prover_name
+  | Holey -> if Logger.log_enabled() then log "no complete proof"
+  | Proof p -> if Logger.log_enabled() then log "proof:@.%s" p *)

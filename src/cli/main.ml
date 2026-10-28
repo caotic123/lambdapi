@@ -285,6 +285,15 @@ let opt_rules =
 {|File holding rewriting rules applied before indexing. Use this option
   multiple times to fetch rules from several files.|} }
 
+let opt_experimental_smt_proofs =
+  { opt_name = "--experimental-smt-proofs"
+  ; opt_short = None
+  ; opt_handle =
+      NoArg(fun () -> Timed.(Handle.Why3_tactic.smt_proofs := true))
+  ; opt_desc =
+{|Experimental. When the why3 tactic calls CVC5, ask it for a proof of the
+  goal in the Alethe format.|} }
+
 let compile_options =
   opt_lib_root
   :: opt_map_dir
@@ -294,6 +303,7 @@ let compile_options =
   :: opt_no_sr_check
   :: opt_db
   :: opt_rules
+  :: opt_experimental_smt_proofs
   :: general_options
 
 (*--------------------------------------------------------------------------*)

@@ -778,7 +778,15 @@ let handle (ss:Sig_state.t) (sym_pos:popt) (priv:bool)
         let ps = assume idopts in
         match ps.proof_goals with
         | Typ gt::_ ->
-            Why3_tactic.handle ss pos cfg gt; tac_admit ss sym_pos ps gt
+            let r = Why3_tactic.handle ss pos cfg gt in 
+            (match r with
+            | Invalid prover -> fatal pos "\"%s\" did not find a proof" prover
+            | Holey -> 
+                if Logger.log_enabled() then log "no complete proof";
+                tac_admit ss sym_pos ps gt
+            | Proof p -> 
+              if Logger.log_enabled() then log "proof:@.%s" p;
+              tac_admit ss sym_pos ps gt)
         | _ -> assert false
       end
   | P_tac_try t ->

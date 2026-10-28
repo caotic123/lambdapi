@@ -1,0 +1,7 @@
+{
+    "ocaml.sandbox": {
+        "kind": "opam",
+        "switch": "default"
+    },
+    "lambdapi.path": "/Users/caotic/Desktop/Workspace/lambdapi/_build/install/default/bin/lambdapi"
+}
