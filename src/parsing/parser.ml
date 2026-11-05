@@ -3,7 +3,8 @@
     This module includes two parsers: a parser for the Lambdapi syntax whose
     functions are available either through the submodule {!module:Parser.Lp}
     or directly in {!module:Parser}, and a parser for the Dedukti syntax
-    available through {!module:Parser.Dk}. *)
+    available through {!module:Parser.Dk}. Alethe proofs produced by SMT
+    solvers are parsed through {!module:Parser.Alethe}. *)
 
 open Lplib open Base
 open Common
@@ -79,6 +80,46 @@ module Dk : PARSER with type lexbuf := Lexing.lexbuf = struct
     fun (lb:lexbuf): p_command ->
     Debug.(record_time Parsing
              (fun () -> r := DkParser.line DkLexer.token lb)); !r
+
+  (* exported functions *)
+  let parse_string = parse_string command
+  let parse_in_channel = parse_in_channel command
+  let parse_file = parse_file command
+  let parse_lexbuf = parse_lexbuf None command
+end
+
+(** Parsing Alethe proofs. *)
+module Alethe = struct
+
+  open Lexing
+
+  let parse_lexbuf (icopt:in_channel option)
+        (entry:lexbuf -> 'a) (lb:lexbuf) : 'a Stream.t =
+    let generator _ =
+      try Some(entry lb)
+      with
+      | End_of_file -> Option.iter close_in icopt; None
+      | AletheParser.Error ->
+          let pos = Pos.locate (lb.lex_start_p, lb.lex_curr_p) in
+          parser_fatal pos "Unexpected token \"%s\"." (lexeme lb)
+    in
+    Stream.from generator
+
+  let parse_in_channel (entry:lexbuf -> 'a) (fname:string) (ic:in_channel)
+      : 'a Stream.t =
+    let lb = from_channel ic in
+    set_filename lb fname;
+    parse_lexbuf (Some ic) entry lb
+
+  let parse_file entry fname = parse_in_channel entry fname (open_in fname)
+
+  let parse_string (entry: lexbuf -> 'a) (fname:string) (s:string)
+      : 'a Stream.t =
+    let lb = from_string s in
+    set_filename lb fname;
+    parse_lexbuf None entry lb
+
+  let command (lb:lexbuf) = AletheParser.line AletheLexer.token lb
 
   (* exported functions *)
   let parse_string = parse_string command

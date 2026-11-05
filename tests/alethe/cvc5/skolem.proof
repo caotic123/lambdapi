@@ -1,0 +1,16 @@
+unsat
+(
+(assume a0 (exists ((x U)) (p x)))
+(assume a1 (forall ((y U)) (not (p y))))
+(anchor :step t0 :args ((y U) (:= (x U) y)))
+(step t0.t0 (cl (= (not (p x)) (not (p y)))) :rule refl)
+(step t0 (cl (= (forall ((x U)) (not (p x))) (forall ((y U)) (not (p y))))) :rule bind)
+(step t1 (cl (= (forall ((y U)) (not (p y))) (forall ((x U)) (not (p x))))) :rule symm :premises (t0))
+(step t2 (cl (! (not (forall ((y U)) (not (p y)))) :named @p_1) (forall ((x U)) (not (p x)))) :rule equiv1 :premises (t1))
+(step t3 (cl (forall ((x U)) (not (p x))) @p_1) :rule reordering :premises (t2))
+(step t4 (cl (not (! (= (exists ((x U)) (p x)) (! (not (forall ((x U)) (not (p x)))) :named @p_2)) :named @p_3)) (not (exists ((x U)) (p x))) @p_2) :rule equiv_pos2)
+(step t5 (cl @p_3) :rule hole :args ("TRUST_THEORY_REWRITE" @p_3 13 7))
+(step t6 (cl @p_2) :rule resolution :premises (t4 t5 a0) :args (@p_3 false (exists ((x U)) (p x)) false))
+(step t7 (cl @p_1) :rule resolution :premises (t3 t6) :args ((forall ((x U)) (not (p x))) true))
+(step t8 (cl) :rule resolution :premises (a1 t7) :args ((forall ((y U)) (not (p y))) true))
+)

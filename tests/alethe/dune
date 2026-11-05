@@ -1,0 +1,9 @@
+; Debugging drivers for the Alethe proof parser.
+; Print the tokens produced by Parsing.AletheLexer:
+;   dune exec tests/alethe/lex_alethe.exe -- tests/alethe/parens.alethe
+;   echo '(())' | dune exec tests/alethe/lex_alethe.exe
+; Print the commands produced by Parsing.Parser.Alethe:
+;   dune exec tests/alethe/parse_alethe.exe -- tests/alethe/step.alethe
+(executables
+ (names lex_alethe parse_alethe)
+ (libraries camlp-streams lambdapi.common lambdapi.parsing))

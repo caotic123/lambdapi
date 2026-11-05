@@ -24,6 +24,18 @@ val timeout : int ref
     --experimental-smt-proofs". *)
 val smt_proofs : bool ref
 
+(** Options added to the CVC5 command when [!smt_proofs] holds. *)
+val cvc5_proof_options : string
+
+(** Main section of the Why3 configuration, and the Why3 environment. *)
+val why3_main : Why3.Whyconf.main
+val why3_env : Why3.Env.env
+
+(** [translate_goal ss pos env g] translates the hypotheses [env] and the goal
+    [g] into a Why3 task. *)
+val translate_goal :
+  Sig_state.t -> Pos.popt -> Env.env -> Term.term -> Why3.Task.task
+
 (** [handle ss pos ps prover_name gt] runs the Why3 prover corresponding to
     [prover_name] (if given or a default one otherwise) on the goal type [gt],
     and fails if no proof is found. *)

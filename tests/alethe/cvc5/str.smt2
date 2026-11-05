@@ -1,0 +1,5 @@
+(set-logic QF_S)
+(declare-const s String)
+(assert (= s "say ""hi"""))
+(assert (not (= (str.len s) 8)))
+(check-sat)

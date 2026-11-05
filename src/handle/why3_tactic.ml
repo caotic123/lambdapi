@@ -65,9 +65,11 @@ let timeout : int ref = ref 2
 let smt_proofs : bool ref = ref false
 
 (** Options added to the CVC5 command when [!smt_proofs] holds: print the
-    proof in the Alethe format, with the pivots of resolution steps. *)
+    proof in the Alethe format, with the pivots of resolution steps, and
+    justify rewrites by RARE rules instead of "hole" steps. *)
 let cvc5_proof_options =
-  "--dump-proofs --proof-format-mode=alethe --proof-alethe-res-pivots"
+  "--dump-proofs --proof-format-mode=alethe --proof-alethe-res-pivots \
+   --proof-granularity=dsl-rewrite"
 
 (** [why3_config] is the Why3 configuration read from the configuration file
    (["~/.why3.conf"] usually). For more information, visit the Why3

@@ -1,0 +1,9 @@
+unsat
+(
+(assume a0 (! (= (+ (* 2 x) (* 4 y)) 7) :named @p_1))
+(step t0 (cl (not (! (= @p_1 false) :named @p_2)) (not @p_1) false) :rule equiv_pos2)
+(step t1 (cl @p_2) :rule hole :args ("TRUST_THEORY_REWRITE" @p_2 3 7))
+(step t2 (cl false) :rule resolution :premises (t0 t1 a0) :args (@p_2 false @p_1 false))
+(step t3 (cl (not false)) :rule false)
+(step t4 (cl) :rule resolution :premises (t2 t3) :args (false true))
+)

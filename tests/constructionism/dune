@@ -1,0 +1,8 @@
+; Test of the coherent preprocessing of why3 tactic goals. It calls CVC5, so
+; it is an executable and not part of `dune test`. From the repository root:
+;   dune exec tests/constructionism/constructionism_why3_test.exe -- \
+;     tests/constructionism/problems.lp tests/why3_examples/*.lp tests/OK/why3.lp
+(executable
+ (name constructionism_why3_test)
+ (libraries camlp-streams why3 lambdapi.common lambdapi.lplib lambdapi.core
+            lambdapi.parsing lambdapi.handle))
