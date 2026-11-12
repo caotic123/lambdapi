@@ -27,9 +27,13 @@
    Vocabulary:
      coherent formula       built from atoms, ⊤, ⊥, ∧, ∨, ∃;
      geometric implication  ∀x̄. φ → ψ  with φ and ψ coherent.
-   If the hypotheses are geometric implications and the goal is coherent, a
-   classical proof gives an intuitionistic one (Barr's theorem, Negri 2003),
-   so the replay with r := G needs no excluded middle (EM).
+   If the hypotheses are geometric implications and the goal is coherent,
+   replaying the classical proof with r := G (Friedman's A-translation)
+   needs no excluded middle (EM). Traversié 2025, Lemma 16, translates any
+   classical proof; geometric hypotheses H give H^T by the unit H → T H,
+   and a coherent goal has G^T = T G (AGENTS.md, "Replay design"). Barr's
+   theorem (Negri 2003) only says that some intuitionistic proof exists,
+   not that CVC5's proof can be translated.
 
    Output: one task per subgoal, made of geometric implications and a
    coherent goal, together with

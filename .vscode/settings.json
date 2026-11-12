@@ -3,5 +3,6 @@
         "kind": "opam",
         "switch": "/home/caotic/Workspace/lambdapi"
     },
-    "lambdapi.path": "/Users/caotic/Desktop/Workspace/lambdapi/_build/install/default/bin/lambdapi"
+    "lambdapi.path": "/home/caotic/Workspace/lambdapi/_build/install/default/bin/lambdapi",
+    "lambdapi.args": ["lsp", "--experimental-smt-proofs", "--debug=tf"]
 }

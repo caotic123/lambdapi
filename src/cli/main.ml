@@ -900,7 +900,8 @@ let cmd_lsp =
             ; args = "[OPTION …]"
             ; summary
             ; desc = summary
-            ; options = opt_standard_lsp::opt_log_file::general_options } in
+            ; options = opt_standard_lsp::opt_log_file
+                        ::opt_experimental_smt_proofs::general_options } in
   fun args ->
   match parse_options c.options args with
   | _::_ -> Common.Error.fatal_no_pos "Invalid argument."

@@ -4,8 +4,29 @@ open Common
 open Core
 open Timed
 
+(** Builtin configuration for propositional logic. *)
+type config =
+  { symb_Prop: Term.sym (** Type of propositions. *)
+  ; symb_P   : Term.sym (** Encoding of propositions. *)
+  ; symb_Set : Term.sym (** Type of sets. *)
+  ; symb_T   : Term.sym (** Encoding of types. *)
+  ; symb_or  : Term.sym (** Disjunction(∨) symbol. *)
+  ; symb_and : Term.sym (** Conjunction(∧) symbol. *)
+  ; symb_imp : Term.sym (** Implication(⇒) symbol. *)
+  ; symb_eqv : Term.sym (** Equivalence(⇔) symbol. *)
+  ; symb_bot : Term.sym (** Bot(⊥) symbol. *)
+  ; symb_top : Term.sym (** Top(⊤) symbol. *)
+  ; symb_not : Term.sym (** Not(¬) symbol. *)
+  ; symb_ex  : Term.sym (** Exists(∃) symbol. *)
+  ; symb_all : Term.sym (** Forall(∀) symbol. *) }
+
+(** [get_config ss pos] build the configuration using [ss]. *)
+val get_config : Sig_state.t -> Pos.popt -> config
+
 type output_solver =
-  | Proof of string (** Valid, with a complete proof (Alethe for CVC5). *)
+  | Proof of string * (string * Term.term) list
+  (** Valid, with a complete proof (Alethe for CVC5), and the lambdapi term
+      of each Why3 symbol of the task. *)
   | Invalid of string (** No proof found. *)
   | Holey
   (** Valid, but without a complete proof: no proof was asked for, or the

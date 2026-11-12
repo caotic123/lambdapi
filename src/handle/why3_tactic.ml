@@ -28,7 +28,9 @@ type config =
 
 (** Result of a prover call. *)
 type output_solver =
-  | Proof of string (** Valid, with a complete proof (Alethe for CVC5). *)
+  | Proof of string * (string * term) list
+  (** Valid, with a complete proof (Alethe for CVC5), and the lambdapi term
+      of each Why3 symbol of the task (see [names_of_l2y]). *)
   | Invalid of string (** No proof found. *)
   | Holey
   (** Valid, but without a complete proof: no proof was asked for, or the
@@ -353,10 +355,25 @@ let rec translate_prop : config -> l2y -> term -> l2y * Why3.Term.term =
       end
   | _ -> default m t
 
-(** [translate_goal ss pos env g] translates the hypotheses [env] and the goal
-    [g] into a Why3 task. *)
-let translate_goal :
-      Sig_state.t -> Pos.popt -> Env.env -> term -> Why3.Task.task =
+(** [names_of_l2y m] maps the name of each Why3 symbol of [m] to its
+    lambdapi term. Bound variables are not included. FIXME: the SMT-LIB
+    printer may change these names. *)
+let names_of_l2y : l2y -> (string * term) list = fun m ->
+  let ts (t,s) = s.Why3.Ty.ts_name.id_string, t
+  and ls (t,s) = s.Why3.Term.ls_name.id_string, t in
+  List.map (fun (s,x) -> ts (mk_Symb s, x)) m.s2ts
+  @ List.map ts m.t2ts
+  @ List.map (fun (v,x) -> x.Why3.Ty.tv_name.id_string, mk_Vari v) m.v2tv
+  @ List.map (fun (s,(x,_)) -> ls (mk_Symb s, x)) m.s2ls
+  @ List.map (fun (v,(x,_)) -> ls (mk_Vari v, x)) m.v2ls
+  @ List.map ls m.t2ls
+
+(** [translate_goal_names ss pos env g] translates the hypotheses [env] and
+    the goal [g] into a Why3 task. It also returns the lambdapi term of
+    each Why3 symbol. *)
+let translate_goal_names :
+      Sig_state.t -> Pos.popt -> Env.env -> term
+      -> Why3.Task.task * (string * term) list =
   fun ss pos env g ->
   let cfg = get_config ss pos in
   (* Translate environment. *)
@@ -430,7 +447,13 @@ let translate_goal :
   let goal = Why3.Decl.create_prsymbol (Why3.Ident.id_fresh "G") in
   let tsk = Why3.Task.add_prop_decl tsk Why3.Decl.Pgoal goal g in
   if Logger.log_enabled() then log "%a" Why3.Pretty.print_task tsk;
-  tsk
+  tsk, names_of_l2y m
+
+(** [translate_goal ss pos env g] translates the hypotheses [env] and the goal
+    [g] into a Why3 task. *)
+let translate_goal :
+      Sig_state.t -> Pos.popt -> Env.env -> term -> Why3.Task.task =
+  fun ss pos env g -> fst (translate_goal_names ss pos env g)
 
 (** [run tsk pos prover_name] sends [tsk] to [prover_name]. If [!smt_proofs]
     holds and the prover is CVC5, the prover is also asked for a proof. *)
@@ -480,7 +503,7 @@ let run : Why3.Task.task -> Pos.popt -> string -> output_solver =
   let res = Why3.Call_provers.wait_on_call call in
   if res.pr_answer <> Why3.Call_provers.Valid then Invalid prover.prover.prover_name
   else if not with_proof then Holey
-  else Proof res.pr_output
+  else Proof(res.pr_output, [])
 
 (** [handle ss pos prover_name gt] runs the Why3 prover corresponding to
     [prover_name] (if given or a default one otherwise) on the goal type [gt],
@@ -492,12 +515,14 @@ let handle :
   let g = Typ gt in
   if Logger.log_enabled() then log "%a" Goal.pp g;
   (* Encode the goal in Why3. *)
-  let tsk = translate_goal ss pos hyps t in
+  let tsk, names = translate_goal_names ss pos hyps t in
   (* Get the name of the prover. *)
   let prover_name = Option.get !default_prover prover_name in
   if Logger.log_enabled() then log "running with prover \"%s\"" prover_name;
   (* Run the task with the prover named [prover_name]. *)
-  run tsk pos prover_name
+  match run tsk pos prover_name with
+  | Proof(p,_) -> Proof(p,names)
+  | r -> r
   
   (*match run tsk pos prover_name with
   | Invalid -> fatal pos "\"%s\" did not find a proof" prover_name

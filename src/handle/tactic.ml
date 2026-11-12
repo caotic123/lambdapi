@@ -784,8 +784,19 @@ let handle (ss:Sig_state.t) (sym_pos:popt) (priv:bool)
             | Holey -> 
                 if Logger.log_enabled() then log "no complete proof";
                 tac_admit ss sym_pos ps gt
-            | Proof p -> 
-              if Logger.log_enabled() then log "proof:@.%s" p;
+            | Proof(out,names) ->
+              if Logger.log_enabled() then log "proof:@.%s" out;
+              (* Build the proof term, for debugging only: the
+                 reconstruction is not complete yet, so the goal is still
+                 admitted. TODO: refine the goal with the term instead,
+                 [tac_refine pos ps gt gs p t]; the decidability
+                 instances it needs then become new goals. *)
+              let p = new_problem() in
+              (match Reconstruct.replay ss pos gt (out,names) p with
+               | (_:term) -> ()
+               | exception Reconstruct.Unsupported msg ->
+                   if Logger.log_enabled() then
+                     log "proof not replayed: %s" msg);
               tac_admit ss sym_pos ps gt)
         | _ -> assert false
       end
