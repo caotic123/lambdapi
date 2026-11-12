@@ -793,7 +793,7 @@ let handle (ss:Sig_state.t) (sym_pos:popt) (priv:bool)
                  instances it needs then become new goals. *)
               let p = new_problem() in
               (match Reconstruct.replay ss pos gt (out,names) p with
-               | (_:term) -> ()
+               | (_:term * (term * term) list) -> ()
                | exception Reconstruct.Unsupported msg ->
                    if Logger.log_enabled() then
                      log "proof not replayed: %s" msg);
