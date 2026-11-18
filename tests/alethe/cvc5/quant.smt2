@@ -1,6 +1,0 @@
-(set-logic UF)
-(declare-sort U 0)
-(declare-fun p (U) Bool) (declare-const a U)
-(assert (forall ((x U)) (p x)))
-(assert (not (p a)))
-(check-sat)

@@ -28,13 +28,12 @@ type config =
 
 (** Result of a prover call. *)
 type output_solver =
-  | Proof of string * (string * term) list
-  (** Valid, with a complete proof (Alethe for CVC5), and the lambdapi term
-      of each Why3 symbol of the task (see [names_of_l2y]). *)
-  | Invalid of string (** No proof found. *)
-  | Holey
-  (** Valid, but without a complete proof: no proof was asked for, or the
-      proof could not be read, or it has steps justified by "hole". *)
+  | Proof of { problem : string; output : string }
+  (** Valid, with a proof: [problem] is the SMT-LIB problem sent to the
+      prover, and [output] is what the prover printed ("unsat" and an
+      Alethe proof for CVC5). *)
+  | Invalid of string (** No proof found, by the prover of that name. *)
+  | Holey (** Valid, but no proof was asked for. *)
 
 (** [get_config ss pos] build the configuration using [ss]. *)
 let get_config : Sig_state.t -> Pos.popt -> config = fun ss pos ->
@@ -66,12 +65,19 @@ let timeout : int ref = ref 2
     --experimental-smt-proofs". *)
 let smt_proofs : bool ref = ref false
 
-(** Options added to the CVC5 command when [!smt_proofs] holds: print the
-    proof in the Alethe format, with the pivots of resolution steps, and
-    justify rewrites by RARE rules instead of "hole" steps. *)
+(** Options added to the CVC5 command when [!smt_proofs] holds: the ones of
+    the cvc5 -> Carcara -> Lambdapi pipeline of A. Coltellacci's thesis
+    (§12.2). Print the proof in the Alethe format, justify rewrites by RARE
+    rules instead of "hole" steps, give the pivots of resolution steps,
+    eliminate mixed Int/Real arithmetic, and print rationals and negative
+    literals as single tokens (e.g. 1/4, -1.5). Turn off the statistics
+    that the command of Why3 asks for ("--stats-internal"), so that the
+    output is only the answer and the proof, which Carcara reads as it
+    is. *)
 let cvc5_proof_options =
-  "--dump-proofs --proof-format-mode=alethe --proof-alethe-res-pivots \
-   --proof-granularity=dsl-rewrite"
+  "--dump-proofs --proof-format-mode=alethe --proof-granularity=dsl-rewrite \
+   --proof-alethe-res-pivots --proof-elim-subtypes --print-arith-lit-token \
+   --no-stats --no-stats-internal"
 
 (** [why3_config] is the Why3 configuration read from the configuration file
    (["~/.why3.conf"] usually). For more information, visit the Why3
@@ -355,25 +361,10 @@ let rec translate_prop : config -> l2y -> term -> l2y * Why3.Term.term =
       end
   | _ -> default m t
 
-(** [names_of_l2y m] maps the name of each Why3 symbol of [m] to its
-    lambdapi term. Bound variables are not included. FIXME: the SMT-LIB
-    printer may change these names. *)
-let names_of_l2y : l2y -> (string * term) list = fun m ->
-  let ts (t,s) = s.Why3.Ty.ts_name.id_string, t
-  and ls (t,s) = s.Why3.Term.ls_name.id_string, t in
-  List.map (fun (s,x) -> ts (mk_Symb s, x)) m.s2ts
-  @ List.map ts m.t2ts
-  @ List.map (fun (v,x) -> x.Why3.Ty.tv_name.id_string, mk_Vari v) m.v2tv
-  @ List.map (fun (s,(x,_)) -> ls (mk_Symb s, x)) m.s2ls
-  @ List.map (fun (v,(x,_)) -> ls (mk_Vari v, x)) m.v2ls
-  @ List.map ls m.t2ls
-
-(** [translate_goal_names ss pos env g] translates the hypotheses [env] and
-    the goal [g] into a Why3 task. It also returns the lambdapi term of
-    each Why3 symbol. *)
-let translate_goal_names :
-      Sig_state.t -> Pos.popt -> Env.env -> term
-      -> Why3.Task.task * (string * term) list =
+(** [translate_goal ss pos env g] translates the hypotheses [env] and the goal
+    [g] into a Why3 task. *)
+let translate_goal :
+      Sig_state.t -> Pos.popt -> Env.env -> term -> Why3.Task.task =
   fun ss pos env g ->
   let cfg = get_config ss pos in
   (* Translate environment. *)
@@ -447,13 +438,7 @@ let translate_goal_names :
   let goal = Why3.Decl.create_prsymbol (Why3.Ident.id_fresh "G") in
   let tsk = Why3.Task.add_prop_decl tsk Why3.Decl.Pgoal goal g in
   if Logger.log_enabled() then log "%a" Why3.Pretty.print_task tsk;
-  tsk, names_of_l2y m
-
-(** [translate_goal ss pos env g] translates the hypotheses [env] and the goal
-    [g] into a Why3 task. *)
-let translate_goal :
-      Sig_state.t -> Pos.popt -> Env.env -> term -> Why3.Task.task =
-  fun ss pos env g -> fst (translate_goal_names ss pos env g)
+  tsk
 
 (** [run tsk pos prover_name] sends [tsk] to [prover_name]. If [!smt_proofs]
     holds and the prover is CVC5, the prover is also asked for a proof. *)
@@ -501,13 +486,18 @@ let run : Why3.Task.task -> Pos.popt -> string -> output_solver =
   let call =
     Why3.Driver.prove_task ~command ~config:why3_main ~limits driver tsk in
   let res = Why3.Call_provers.wait_on_call call in
-  if res.pr_answer <> Why3.Call_provers.Valid then Invalid prover.prover.prover_name
+  if res.pr_answer <> Why3.Call_provers.Valid then
+    Invalid prover.prover.prover_name
   else if not with_proof then Holey
-  else Proof(res.pr_output, [])
+  else
+    (* The problem as the driver printed it for the prover: a proof checker
+       needs it next to the proof. *)
+    let problem = Format.asprintf "%a" (Why3.Driver.print_task driver) tsk in
+    Proof {problem; output = res.pr_output}
 
 (** [handle ss pos prover_name gt] runs the Why3 prover corresponding to
-    [prover_name] (if given or a default one otherwise) on the goal type [gt],
-    and fails if no proof is found. *)
+    [prover_name] (if given or a default one otherwise) on the goal type
+    [gt]. *)
 let handle :
   Sig_state.t -> Pos.popt -> string option -> goal_typ -> output_solver =
   fun ss pos prover_name
@@ -515,16 +505,9 @@ let handle :
   let g = Typ gt in
   if Logger.log_enabled() then log "%a" Goal.pp g;
   (* Encode the goal in Why3. *)
-  let tsk, names = translate_goal_names ss pos hyps t in
+  let tsk = translate_goal ss pos hyps t in
   (* Get the name of the prover. *)
   let prover_name = Option.get !default_prover prover_name in
   if Logger.log_enabled() then log "running with prover \"%s\"" prover_name;
   (* Run the task with the prover named [prover_name]. *)
-  match run tsk pos prover_name with
-  | Proof(p,_) -> Proof(p,names)
-  | r -> r
-  
-  (*match run tsk pos prover_name with
-  | Invalid -> fatal pos "\"%s\" did not find a proof" prover_name
-  | Holey -> if Logger.log_enabled() then log "no complete proof"
-  | Proof p -> if Logger.log_enabled() then log "proof:@.%s" p *)
+  run tsk pos prover_name

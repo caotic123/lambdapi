@@ -292,7 +292,21 @@ let opt_experimental_smt_proofs =
       NoArg(fun () -> Timed.(Handle.Why3_tactic.smt_proofs := true))
   ; opt_desc =
 {|Experimental. When the why3 tactic calls CVC5, ask it for a proof of the
-  goal in the Alethe format.|} }
+  goal in the Alethe format, translate it into Lambdapi with Carcara (see
+  "--carcara"), type-check the translation and print it. The goal is still
+  admitted. The translation is checked with the same library root and
+  "--map-dir" options, so the modules alethe.* of Carcara's library and
+  Stdlib.* must be reachable from them.|} }
+
+let opt_carcara =
+  { opt_name = "--carcara"
+  ; opt_short = None
+  ; opt_handle =
+      Next("PATH", fun v -> Stdlib.(Handle.Reconstruction.command := v))
+  ; opt_desc =
+{|Experimental. Use the Carcara executable PATH to translate the proofs asked
+  for by "--experimental-smt-proofs" ("carcara" by default). It needs the
+  "translate lambdapi" command of the fork NotBad4U/carcara.|} }
 
 let compile_options =
   opt_lib_root
@@ -304,6 +318,7 @@ let compile_options =
   :: opt_db
   :: opt_rules
   :: opt_experimental_smt_proofs
+  :: opt_carcara
   :: general_options
 
 (*--------------------------------------------------------------------------*)
@@ -901,7 +916,8 @@ let cmd_lsp =
             ; summary
             ; desc = summary
             ; options = opt_standard_lsp::opt_log_file
-                        ::opt_experimental_smt_proofs::general_options } in
+                        ::opt_experimental_smt_proofs::opt_carcara
+                        ::general_options } in
   fun args ->
   match parse_options c.options args with
   | _::_ -> Common.Error.fatal_no_pos "Invalid argument."

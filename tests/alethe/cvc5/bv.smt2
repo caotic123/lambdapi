@@ -1,5 +1,0 @@
-(set-logic QF_BV)
-(declare-const x (_ BitVec 4))
-(assert (= (bvadd x #b0001) #x0))
-(assert (not (= x #b1111)))
-(check-sat)

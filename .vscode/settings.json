@@ -1,8 +1,9 @@
 {
-    "ocaml.sandbox": {
-        "kind": "opam",
-        "switch": "/home/caotic/Workspace/lambdapi"
-    },
-    "lambdapi.path": "/home/caotic/Workspace/lambdapi/_build/install/default/bin/lambdapi",
-    "lambdapi.args": ["lsp", "--experimental-smt-proofs", "--debug=tf"]
+    "lambdapi.path": "/Users/caotic/Desktop/Workspace/lambdapi/_build/install/default/bin/lambdapi",
+    "lambdapi.args": [
+        "lsp",
+        "--experimental-smt-proofs",
+        "--carcara",
+        "/Users/caotic/Desktop/Workspace/carcara-lambdapi/target/release/carcara"
+    ]
 }

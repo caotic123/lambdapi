@@ -1,9 +1,0 @@
-unsat
-(
-(assume h1 (! (or p q) :named @p_1))
-(assume a1 (! (not p) :named @p_2))
-(assume a2 (! (not q) :named @p_3))
-(step t0 (cl (! (not @p_1) :named @p_4) p q) :rule or_pos)
-(step t1 (cl @p_4) :rule resolution :premises (t0 a1 a2) :args (p true q true))
-(step t2 (cl) :rule resolution :premises (h1 t1) :args (@p_1 true))
-)
