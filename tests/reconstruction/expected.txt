@@ -1,0 +1,45 @@
+atoms.lp               rule_unfold    reconstructed holes=5
+atoms.lp               def_unfold     reconstructed holes=7
+atoms.lp               opaque_atom    reconstructed holes=3
+atoms.lp               empty_type     reconstructed holes=1
+encoding.lp            mp             foreign holes=5
+fatal/ex_all.lp        ex_all         error: "CVC5" did not find a proof
+fatal/fun_var.lp       fun_var        crash: File "src/handle/why3_tactic.ml", line 253, characters 22-28: Assertion failed.
+fatal/invalid.lp       invalid        error: "CVC5" did not find a proof
+fatal/no_require.lp    mp             error: The reconstruction of this proof uses Carcara's library. Add to the file: require alethe.core alethe.prop alethe.rare.prop;
+fatal/poly.lp          poly           crash: This declaration isn't supported: predicate (=) 'a 'a
+fol.lp                 ground         reconstructed holes=5
+fol.lp                 ex3b           reconstructed holes=7
+fol.lp                 ex2            reconstructed holes=7
+fol.lp                 uf             reconstructed holes=7
+fol.lp                 inst           reconstructed holes=5
+fol.lp                 ex_intro       reconstructed holes=5
+fol.lp                 all_mp         reconstructed holes=6
+fol.lp                 ex_mono        reconstructed holes=6
+fol.lp                 all_premise    reconstructed holes=5
+fol.lp                 all_swap       reconstructed holes=4 admit=qnt_join
+fol.lp                 not_all        reconstructed holes=4
+fol.lp                 dns            reconstructed holes=4
+prop.lp                id             reconstructed holes=2
+prop.lp                and_elim       reconstructed holes=2
+prop.lp                or_intro       reconstructed holes=2
+prop.lp                mp             reconstructed holes=3
+prop.lp                ex1            reconstructed holes=3
+prop.lp                mt             reconstructed holes=3
+prop.lp                curry          reconstructed holes=2
+prop.lp                imp_premise    reconstructed holes=3
+prop.lp                triple_neg     reconstructed holes=2
+prop.lp                iff_elim       reconstructed holes=3
+prop.lp                iff_trans      reconstructed holes=3
+prop.lp                syllogism      reconstructed holes=1
+prop.lp                and_comm       reconstructed holes=1
+prop.lp                or_elim        reconstructed holes=4
+prop.lp                top_intro      reconstructed holes=1
+prop.lp                bot_elim       reconstructed holes=2
+prop.lp                distrib        reconstructed holes=1 admit=not_equiv1
+prop.lp                de_morgan      reconstructed holes=1 admit=not_equiv1
+prop.lp                em             reconstructed holes=1
+prop.lp                dne            reconstructed holes=2
+prop.lp                peirce         reconstructed holes=1
+prop.lp                contra         reconstructed holes=2
+prop.lp                not_and        reconstructed holes=2

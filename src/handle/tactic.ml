@@ -137,60 +137,6 @@ let tac_refine : ?check:bool ->
   (* Convert the metas and constraints of [p] not in [gs] into new goals. *)
   tac_solve pos {ps with proof_goals = add_goals_of_problem p gs}
 
-(** [tac_reconstruct ss pos sym_pos ps gt gs assumed r] closes the typing
-    goal [gt] with the theorem of the translation [r] of an SMT proof, which
-    takes the constants of the problem and proofs of its premises. A
-    constant is the variable of the goal with the same name, if it has the
-    type of the constant. What else relates the translation to the goal is
-    left as holes, which are admitted as axioms for now: under the
-    hypotheses of the goal, the other constants exist, each premise of the
-    translation holds, and the statement of its theorem implies the goal.
-    [assumed] are the names of the hypotheses that the tactic introduced,
-    for printing. *)
-let tac_reconstruct :
-  Sig_state.t -> popt -> popt -> proof_state -> goal_typ -> goal list
-  -> string list -> Reconstruction.reconstruction -> proof_state =
-  fun ss pos sym_pos ps gt gs assumed r ->
-  let env = gt.goal_hyps in
-  let ctx = Env.to_ctxt env in
-  (* [hole a] is a proof of [a] under the hypotheses of the goal. *)
-  let hole a =
-    let m = LibMeta.fresh (new_problem()) (Env.to_prod env a)
-              (List.length env) in
-    admit_meta ss sym_pos m;
-    mk_Meta(m, Env.to_terms env)
-  in
-  let name (s : p_symbol) = s.p_sym_nam.elt in
-  let tr = r.translation in
-  (* The value of the constant [x] of type [a], and whether it is a hole. *)
-  let constant x a =
-    match List.assoc_opt x env with
-    | Some (v, b, _) when Eval.eq_modulo ctx a b -> mk_Vari v, false
-    | _ -> hole a, true
-  in
-  (* Apply [t] of type [a] to the constants [xs], then to a hole for each
-     of its [n] next arguments. *)
-  let rec plug t a cs ds xs n =
-    match xs, unfold a with
-    | x :: xs, Prod(d, b) ->
-        let v, h = constant x d in
-        plug (mk_Appl(t, v)) (subst b v) ((x, d, v, h) :: cs) ds xs n
-    | [], Prod(d, b) when n > 0 ->
-        let h = hole d in
-        plug (mk_Appl(t, h)) (subst b h) cs (d :: ds) [] (n - 1)
-    | [], _ when n = 0 -> t, a, List.rev cs, List.rev ds
-    | _ -> assert false
-  in
-  let th = r.theorem in
-  let proof, statement, constants, premises =
-    plug (mk_Symb th) !(th.sym_type) [] [] (List.map name tr.constants)
-      (List.length tr.premises)
-  in
-  let implies = hole (mk_Arro(statement, gt.goal_type)) in
-  Reconstruction.Report.script pos r ~assumed ~constants ~premises
-    ~statement ~goal:gt.goal_type;
-  tac_refine pos ps gt gs (new_problem()) (mk_Appl(implies, proof))
-
 (** [ind_data t] returns the [ind_data] structure of [s] if [t] is of the
    form [s t1 .. tn] with [s] an inductive type. Fails otherwise. *)
 let ind_data : popt -> Env.t -> term -> Sign.ind_data = fun pos env a ->
@@ -831,23 +777,21 @@ let handle (ss:Sig_state.t) (sym_pos:popt) (priv:bool)
         let idopts = Env.gen_valid_idopts env ids in
         let ps = assume idopts in
         match ps.proof_goals with
-        | Typ gt::gs ->
+        | Typ gt::_ ->
             begin match Why3_tactic.handle ss pos cfg gt with
             | Invalid prover ->
                 fatal pos "\"%s\" did not find a proof" prover
             | Holey -> tac_admit ss sym_pos ps gt
-            | Proof {problem; output} ->
+            | Proof {problem; output; l2y; hyps = why3_hyps} ->
                 if Logger.log_enabled() then log "proof:@.%s" output;
-                (* Reconstruction through Carcara. *)
-                begin match Reconstruction.output ss pos ~problem ~output with
-                | None -> tac_admit ss sym_pos ps gt
-                | Some r ->
-                    let n = List.length gt.goal_hyps - List.length env in
-                    let assumed =
-                      List.rev_map fst (List.filteri (fun i _ -> i < n)
-                                          gt.goal_hyps) in
-                    tac_reconstruct ss pos sym_pos ps gt gs assumed r
-                end
+                (* The translation of the proof by Carcara, as a syntax
+                   tree. It is not used yet: the goal is admitted. *)
+                let goal =
+                  {Reconstruction.hyps = gt.goal_hyps;
+                   target = gt.goal_type; l2y; why3_hyps}
+                in
+                ignore (Reconstruction.output ss pos ~goal ~problem ~output);
+                tac_admit ss sym_pos ps gt
             end
         | _ -> assert false
       end

@@ -4,12 +4,34 @@ open Common
 open Core
 open Timed
 
+(** How Lambdapi symbols, variables and terms are mapped to Why3 symbols or
+    variables. *)
+type l2y =
+  { s2ts : (Term.sym * Why3.Ty.tysymbol) list
+  (** Mapping of type symbols. *)
+  ; t2ts : (Term.term * Why3.Ty.tysymbol) list
+  (** Mapping of non-Why3 subtypes. *)
+  ; v2tv : (Term.var * Why3.Ty.tvsymbol) list
+  (** Mapping of type variables. *)
+  ; s2ls : (Term.sym * (Why3.Term.lsymbol * bool)) list
+  (** Mapping of function symbols. [true] is for predicates. *)
+  ; v2ls : (Term.var * (Why3.Term.lsymbol * bool)) list
+  (** Mapping of environment variables. [true] is for predicates. *)
+  ; t2ls : (Term.term * Why3.Term.lsymbol) list
+  (** Mapping of non-Why3 subterms. *)
+  ; v2vs : (Term.var * Why3.Term.vsymbol) list
+  (** Mapping of object variables. *) }
+
 (** Result of a prover call. *)
 type output_solver =
-  | Proof of { problem : string; output : string }
+  | Proof of
+      { problem : string; output : string
+      ; l2y : l2y; hyps : (string * Why3.Term.term) list }
   (** Valid, with a proof: [problem] is the SMT-LIB problem sent to the
       prover, and [output] is what the prover printed ("unsat" and an
-      Alethe proof for CVC5). *)
+      Alethe proof for CVC5). [l2y] maps the symbols and variables of the
+      goal to Why3, and [hyps] are the translated hypotheses, with their
+      names, in the order of the task. *)
   | Invalid of string (** No proof found, by the prover of that name. *)
   | Holey (** Valid, but no proof was asked for. *)
 

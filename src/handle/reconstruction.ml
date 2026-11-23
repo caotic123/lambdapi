@@ -4,558 +4,366 @@
     "--experimental-smt-proofs"), the proof and the SMT-LIB problem that Why3
     sent to CVC5 are handed to the Lambdapi backend of Carcara ("carcara
     translate lambdapi", from the fork NotBad4U/carcara, branch
-    lambdapi-refactor). The Lambdapi file it produces is loaded as a module
-    in the current process, which type-checks it, and the current signature
-    depends on it. That module is written in the encoding of Carcara's own
-    library (the package [alethe], over the Lambdapi Stdlib), not in the one
-    of the goal: what relates the two is left as holes by the tactic. *)
+    lambdapi-refactor). The Lambdapi file it produces is parsed, and its
+    syntax tree is returned. *)
 
+open Lplib
 open Common
 open Error
+open Core
 
 let log = Logger.make 'h' "carc" "Carcara reconstruction"
 let log = log.pp
-
-(** {1 Running Carcara and Lambdapi} *)
-
-(** Command running Carcara. Set by "--carcara". *)
 let command : string Stdlib.ref = Stdlib.ref "carcara"
-
-(** Options of "carcara translate lambdapi": the parser flags that the
-    proofs of CVC5 need. *)
 let options = ["--expand-let-bindings"; "--allow-int-real-subtyping"]
 
-let write : string -> string -> unit = fun file s ->
-  Out_channel.with_open_bin file (fun oc -> output_string oc s)
-
-let read : string -> string = fun file ->
-  try In_channel.with_open_bin file In_channel.input_all
-  with Sys_error _ -> ""
-
-(** [translate dir extra] translates with Carcara, run with the options
-    [extra], the Alethe proof [dir/proof.alethe] of the SMT-LIB problem
-    [dir/problem.smt2] into the Lambdapi file [dir/proof.lp]. The messages
-    of Carcara are kept in [dir/carcara.err]. It tells whether Carcara
-    succeeded. *)
-let translate : string -> string list -> bool = fun dir extra ->
-  let file f = Filename.concat dir f in
-  let args =
-    ["translate"; "lambdapi"; file "proof.alethe"; file "problem.smt2"]
-    @ options @ extra
-  in
-  let cmd =
-    Filename.quote_command !command args
-      ~stdout:(file "proof.lp") ~stderr:(file "carcara.err")
-  in
-  if Logger.log_enabled() then log "%s" cmd;
-  Sys.command cmd = 0
-
-(** {1 The translation as a Lambdapi AST} *)
-
-open Pos
-open Parsing
-open Syntax
-
-(** The [symbol] declarations of a translation, sorted by role, in the order
-    of the file. *)
-type translation =
-  { commands : p_command list (** All the commands of the file. *)
-  ; constants : p_symbol list
-    (** [symbol x : T;] where [T] is not a proof type: the sorts and the
-        function symbols of the problem. *)
-  ; definitions : p_symbol list
-    (** [symbol p_N ≔ t;]: the names of shared closed subterms. *)
-  ; premises : p_symbol list
-    (** [symbol aN : π̇ (A ⸬ □);]: the assertions of the problem, which are
-        postulated. *)
-  ; lemmas : p_symbol list
-    (** [opaque symbol tN … ≔ begin … end;]: the steps of the proof, the
-        theorem included. *)
-  ; theorem : p_symbol option
-    (** The last lemma: Carcara ends the file with the theorem that the
-        proof establishes (see goal.rs in Carcara). *) }
-
-(** [head t] is the identifier at the head of [t], if any. *)
-let rec head : p_term -> string option = fun t ->
-  match t.elt with
-  | P_Wrap t | P_Appl(t,_) -> head t
-  | P_Iden({elt=(_,s);_},_) -> Some s
-  | _ -> None
-
-(** [is_proof_type t] tells whether [t] is a proof type of Carcara's
-    library: [π̇ l] (the clause [l] holds) or [π a] (the formula [a]
-    holds). *)
-let is_proof_type : p_term -> bool = fun t ->
-  match head t with Some ("π̇" | "π") -> true | _ -> false
-
-(** Role of a symbol declaration in a translation. *)
-type role = Constant | Definition | Premise | Lemma
-
-(** [role s] is the role of the symbol declaration [s], given by whether it
-    is opaque, whether it has a definition, and whether its type is a proof
-    type. *)
-let role : p_symbol -> role = fun s ->
-  let opaque = List.exists is_opaq s.p_sym_mod in
-  let proof_type = Option.map is_proof_type s.p_sym_typ in
-  match opaque, s.p_sym_trm, proof_type with
-  | true , _     , _                   -> Lemma
-  | false, Some _, _                   -> Definition
-  | false, None  , Some true           -> Premise
-  | false, None  , (Some false | None) -> Constant
-
-(** [commands cs] is the list of the commands of the stream [cs]. *)
-let rec commands : p_commands -> p_command list = fun cs ->
-  match Stream.peek cs with
-  | None -> []
-  | Some c -> Stream.junk cs; c :: commands cs
-
-(** [parse file] parses with the parser of Lambdapi the [file] produced by
-    Carcara, which is a plain Lambdapi file. *)
-let parse : string -> translation = fun file ->
-  let commands = commands (Parser.parse_file file) in
-  let symbol c = match c.elt with P_symbol s -> Some s | _ -> None in
-  let symbols = List.filter_map symbol commands in
-  let having r = List.filter (fun s -> role s = r) symbols in
-  let lemmas = having Lemma in
-  { commands
-  ; constants = having Constant
-  ; definitions = having Definition
-  ; premises = having Premise
-  ; lemmas
-  ; theorem = List.nth_opt lemmas (List.length lemmas - 1) }
-
-(** [statement s] is the statement of [s]: its type, quantified over its
-    parameters. *)
-let statement : p_symbol -> p_term = fun s ->
-  let t = match s.p_sym_typ with Some t -> t | None -> Pos.none P_Wild in
-  match s.p_sym_arg with [] -> t | xs -> Pos.none (P_Prod(xs, t))
-
-(** {1 Abstraction over the constants and the premises}
-
-    Carcara declares the constants of the problem and postulates its
-    premises, as symbols, and its definitions and lemmas use them. To apply
-    the theorem to the terms and the hypotheses of a goal, the constants and
-    the premises are turned into parameters of every definition and
-    lemma. *)
-
-(** [abstracted s] is the name of the definition or lemma [s] once it takes
-    the constants and the premises as parameters. *)
-let abstracted : string -> string = fun s -> s ^ "_"
-
-(** [rename f t] replaces in [t] each identifier [x] by [u] when [f x] is
-    [Some u]. Binders are not taken into account: the names that [f]
-    renames are not bound in the terms of a translation. *)
-let rec rename : (string -> p_term option) -> p_term -> p_term = fun f t ->
-  let mk elt = {t with elt} in
-  let r = rename f in
-  let params = List.map (fun (ids, a, b) -> ids, Option.map r a, b) in
-  match t.elt with
-  | P_Iden({elt=([],x);_}, false) ->
-      (match f x with Some u -> u | None -> t)
-  | P_Appl(u,v) -> mk (P_Appl(r u, r v))
-  | P_Arro(u,v) -> mk (P_Arro(r u, r v))
-  | P_Wrap u -> mk (P_Wrap(r u))
-  | P_Expl u -> mk (P_Expl(r u))
-  | P_Abst(xs,u) -> mk (P_Abst(params xs, r u))
-  | P_Prod(xs,u) -> mk (P_Prod(params xs, r u))
-  | P_LLet(x,xs,a,u,v) -> mk (P_LLet(x, params xs, Option.map r a, r u, r v))
-  | P_Meta(m,ts) -> mk (P_Meta(m, Array.map r ts))
-  | P_Patt(x,ts) -> mk (P_Patt(x, Option.map (Array.map r) ts))
-  | P_Type | P_Wild | P_Iden _ | P_NLit _ | P_SLit _ -> t
-
-(** [is_abstracted tr] tells whether [abstract tr] changes [tr]. *)
-let is_abstracted : translation -> bool = fun tr ->
-  tr.constants <> [] || tr.premises <> []
-
-(** [abstract tr] is the list of the commands of [tr] where the constants
-    and the premises are not declared anymore: each definition [d] is
-    replaced by [abstracted d], which takes the constants as parameters,
-    and each lemma [t] by [abstracted t], which takes the constants then
-    the premises as its first parameters. In the types and the
-    definitions, a name [d] is replaced by [abstracted d] applied to the
-    constants. The proof of a lemma is unchanged, after tactics that give
-    their meaning back to the names it may use: it assumes the constants
-    and the premises, and it sets the name of each definition and of each
-    previous lemma to its abstraction applied to them. The tactic that
-    unfolds a definition by its name is renamed too. *)
-let abstract : translation -> p_command list = fun tr ->
-  let ident x = Pos.none (P_Iden(Pos.none ([], x), false)) in
-  let name s = s.p_sym_nam.elt in
-  let constants = List.map name tr.constants
-  and premises = List.map name tr.premises
-  and definitions = List.map name tr.definitions in
-  let applied x args =
-    let app t y = Pos.none (P_Appl(t, ident y)) in
-    Pos.none (P_Wrap(List.fold_left app (ident (abstracted x)) args))
-  in
-  let definition x =
-    if List.mem x definitions then Some (applied x constants) else None
-  in
-  let term = rename definition in
-  let params = List.map (fun (ids, a, b) -> ids, Option.map term a, b) in
-  let param s = [Some s.p_sym_nam], Option.map term s.p_sym_typ, false in
-  let constant_params = List.map param tr.constants
-  and premise_params = List.map param tr.premises in
-  let step t = Tactic(Pos.none t, []) in
-  let assume =
-    let id x = Some (Pos.none x) in
-    step (P_tac_assume (List.map id (constants @ premises)))
-  in
-  let set args x = step (P_tac_set(Pos.none x, applied x args)) in
-  let renamed s extra =
-    { s with p_sym_nam = {s.p_sym_nam with elt = abstracted (name s)}
-    ; p_sym_arg = extra @ params s.p_sym_arg
-    ; p_sym_typ = Option.map term s.p_sym_typ
-    ; p_sym_trm = Option.map term s.p_sym_trm }
-  in
-  (* The tactic [simplify d] unfolds the symbol [d], which is now
-     [abstracted d], a function of the constants: its unfolding is then
-     β-reduced. *)
-  let rec proofstep (Tactic(t, subproofs)) =
-    let subproofs = List.map subproof subproofs in
-    match t.elt with
-    | P_tac_simpl(SimpSym({elt=([],x);_} as q))
-      when List.mem x definitions ->
-        let unfold = P_tac_simpl(SimpSym {q with elt = [], abstracted x}) in
-        [Tactic({t with elt = unfold}, []);
-         Tactic({t with elt = P_tac_simpl SimpBetaOnly}, subproofs)]
-    | _ -> [Tactic(t, subproofs)]
-  and subproof steps = List.concat_map proofstep steps in
-  (* [previous] are the names of the lemmas before [c], last first. *)
-  let command (previous, acc) c =
-    match c.elt with
-    | P_symbol s ->
-        begin match role s, s.p_sym_prf with
-        | (Constant | Premise), _ -> previous, acc
-        | Definition, _ ->
-            let s = renamed s constant_params in
-            previous, {c with elt = P_symbol s} :: acc
-        | Lemma, Some(proof, e) ->
-            let intro =
-              assume :: List.map (set constants) definitions
-              @ List.rev_map (set (constants @ premises)) previous
-            in
-            let proof =
-              match List.map subproof proof with
-              | [] -> [intro]
-              | first :: others -> (intro @ first) :: others
-            in
-            let s' = renamed s (constant_params @ premise_params) in
-            let s' = {s' with p_sym_prf = Some(proof, e)} in
-            name s :: previous, {c with elt = P_symbol s'} :: acc
-        | Lemma, None -> previous, c :: acc
-        end
-    | _ -> previous, c :: acc
-  in
-  if is_abstracted tr
-  then List.rev (snd (List.fold_left command ([], []) tr.commands))
-  else tr.commands
-
-(** [theorem_name tr] is the name of the theorem of [tr] in [abstract tr]. *)
-let theorem_name : translation -> string option = fun tr ->
-  let name s =
-    if is_abstracted tr then abstracted s.p_sym_nam.elt
-    else s.p_sym_nam.elt
-  in
-  Option.map name tr.theorem
-
-(** {1 The translation in the current context} *)
-
-open Core
-
-(** [require ss mp] loads the module [mp], compiling it if needed, and makes
-    the signature of [ss] depend on it. It is set by [Compile], which this
-    module cannot depend on. *)
-let require : (Sig_state.t -> Path.t -> Sig_state.t) Stdlib.ref =
+(** [handle ss cmd] handles the command [cmd] in the state [ss], as in a
+    file. It is [Command.handle], which this module cannot depend on: it is
+    set by [Compile]. *)
+let handle : (Sig_state.t -> Parsing.Syntax.p_command -> Sig_state.t)
+    Stdlib.ref =
   Stdlib.ref (fun _ _ -> assert false)
 
-(** [quietly f x] is [f x] without the messages and the warnings that
-    loading modules prints, and without its effect on how terms are
-    printed afterwards. *)
-let quietly : ('a -> 'b) -> 'a -> 'b = fun f x ->
-  let verbose = Timed.(!Console.verbose)
-  and default = Stdlib.(!Console.default_verbose)
-  and warnings = Stdlib.(!Error.no_warnings)
-  and printing = Timed.(!Print.sig_state) in
-  let restore () =
-    Stdlib.(Console.default_verbose := default);
-    Stdlib.(Error.no_warnings := warnings);
-    Timed.(Console.verbose := verbose);
-    Timed.(Print.sig_state := printing)
-  in
-  Stdlib.(Console.default_verbose := 0);
-  Stdlib.(Error.no_warnings := true);
-  Timed.(Console.verbose := 0);
-  Fun.protect ~finally:restore (fun () -> f x)
+(** The goal of a why3 call, after the introductions of the tactic. *)
+type goal =
+  { hyps : Env.env
+  ; target : Term.term
+  ; l2y : Why3_tactic.l2y
+  ; why3_hyps : (string * Why3.Term.term) list
+    (** In the order of the task: the N-th one is the Alethe assumption
+        [aN]. *)
+}
 
-(** [missing ss tr] is the list of the modules that the translation [tr]
-    requires (the ones of Carcara's library) and that the signature of [ss]
-    does not depend on. *)
-let missing : Sig_state.t -> translation -> Path.t list = fun ss tr ->
-  let deps = Timed.(!(ss.signature.sign_deps)) in
-  let paths c =
-    match c.elt with
-    | P_require(_, ps) -> List.map (fun p -> p.elt) ps
-    | _ -> []
-  in
-  List.filter (fun p -> not (Path.Map.mem p deps))
-    (List.concat_map paths tr.commands)
+(** [names goal] maps the names that Carcara's translation declares to the
+    terms of [goal] they stand for: the Why3 names of the symbols and
+    variables of the goal (Carcara keeps the SMT-LIB names, which are the
+    Why3 ones), and ["aN"] for the N-th hypothesis sent to the prover. *)
+let names : goal -> Term.term Extra.StrMap.t = fun goal ->
+  let open Extra in
+  let ts_name ts = ts.Why3.Ty.ts_name.id_string in
+  let ls_name ls = ls.Why3.Term.ls_name.id_string in
+  let add f l m = List.fold_left (fun m x -> let n, t = f x in StrMap.add n t m) m l in
+  let m = goal.l2y in
+  StrMap.empty
+  |> add (fun (s, ts) -> ts_name ts, Term.mk_Symb s) m.s2ts
+  |> add (fun (t, ts) -> ts_name ts, t) m.t2ts
+  |> add (fun (s, (ls, _)) -> ls_name ls, Term.mk_Symb s) m.s2ls
+  |> add (fun (x, (ls, _)) -> ls_name ls, Term.mk_Vari x) m.v2ls
+  |> add (fun (t, ls) -> ls_name ls, t) m.t2ls
+  |> add (fun (i, (name, _)) ->
+          let x, _, _ = List.assoc name goal.hyps in
+          "a" ^ string_of_int i, Term.mk_Vari x)
+       (List.mapi (fun i h -> i, h) goal.why3_hyps)
 
-(** A translation that is loaded, which the goal has to be related to. *)
-type reconstruction =
-  { translation : translation
-  ; file : string (** The Lambdapi file that is loaded. *)
-  ; same_builtins : bool
-    (** Whether the builtins of the current file are the ones of the
-        translation, which its tactics rely on. *)
-  ; theorem : Term.sym
-    (** The theorem of the translation, which takes its constants and
-        proofs of its premises. *) }
+(** Lifting of Carcara's commands. The symbols that Carcara declares for
+    the terms of the goal (the keys of [names]) cannot be declared: the goal
+    variables are not symbols. Their declarations are removed, and they
+    become parameters of every symbol declared after them. A reference to a
+    lifted symbol [s] becomes [s x₁ … xₖ], where [x₁ … xₖ] are the
+    parameters that [s] got. It is done in one pass over the commands. *)
+module Lift = struct
+  open Parsing.Syntax
+  open Extra
 
-(** [load ss dir tr] loads in the current process the translation [tr],
-    abstracted over its constants and premises (see [abstract]): it is
-    written in the file [dir/reconstruction.lp], and loaded as the module
-    [d.reconstruction] where [d] is the name of [dir]. The signature of
-    [ss] then depends on it: its symbols can be used, qualified, in the
-    current file. The modules of Carcara's library that it requires must
-    already be loaded (see [missing]). It fails if the file does not
-    type-check. *)
-let load : Sig_state.t -> string -> translation -> reconstruction =
-  fun ss dir tr ->
-  let b = Buffer.create 4096 in
-  let ppf = Format.formatter_of_buffer b in
-  List.iter (Format.fprintf ppf "%a@." Pretty.command) (abstract tr);
-  Format.pp_print_flush ppf ();
-  let file = Filename.concat dir "reconstruction.lp" in
-  write file (Buffer.contents b);
-  let root = Filename.basename dir in
-  Library.add_mapping ([root], dir);
-  let mp = [root; "reconstruction"] in
-  ignore (quietly (Stdlib.(!require) ss) mp);
-  let sign = Path.Map.find mp Timed.(!Sign.loaded) in
-  (* The builtins of the translation are the ones of the modules it depends
-     on. *)
-  let same_builtins =
-    let module M = Lplib.Extra.StrMap in
-    let add p _ m =
-      match Path.Map.find_opt p Timed.(!Sign.loaded) with
-      | Some d -> M.union (fun _ _ s -> Some s) m Timed.(!(d.sign_builtins))
-      | None -> m
+  (** The parameters so far, with their types (already lifted). *)
+  type params = (p_ident * p_term) list
+
+  (** The names of the parameters that each lifted symbol got, in order. *)
+  type arity = string list StrMap.t
+
+  (** [app_term arity t] replaces in [t] every symbol [s] of [arity] by [s]
+      applied to its parameters. Binders are not taken into account. *)
+  let rec app_term : arity -> p_term -> p_term = fun arity t ->
+    (* [app_vars t xs] is the term [t x₁ … xₖ]. *)
+    let rec app_vars : p_term -> string list -> p_term = fun t xs ->
+      match xs with
+      | [] -> t
+      | x :: xs ->
+          let var = {t with elt = P_Iden ({t with elt = ([], x)}, false)} in
+          app_vars {t with elt = P_Appl (t, var)} xs
     in
-    let theirs = Path.Map.fold add Timed.(!(sign.sign_deps)) M.empty in
-    let same b s =
-      match M.find_opt b ss.builtins with Some s' -> s' == s | None -> true
+    match t.elt with
+    | P_Iden ({elt = ([], s); _}, _) when StrMap.mem s arity ->
+        app_vars t (StrMap.find s arity)
+    | P_Type | P_Iden _ | P_Wild | P_Patt _ | P_NLit _ | P_SLit _ -> t
+    | P_Meta (m, ts) -> {t with elt = P_Meta (m, Array.map (app_term arity) ts)}
+    | P_Appl (u, v) -> {t with elt = P_Appl (app_term arity u, app_term arity v)}
+    | P_Arro (u, v) -> {t with elt = P_Arro (app_term arity u, app_term arity v)}
+    | P_Wrap u -> {t with elt = P_Wrap (app_term arity u)}
+    | P_Expl u -> {t with elt = P_Expl (app_term arity u)}
+    | P_Abst (ps, u) ->
+        {t with elt = P_Abst (app_params arity ps, app_term arity u)}
+    | P_Prod (ps, u) ->
+        {t with elt = P_Prod (app_params arity ps, app_term arity u)}
+    | P_LLet (y, ps, a, u, v) ->
+        {t with elt =
+           P_LLet (y, app_params arity ps, app_term_opt arity a,
+                   app_term arity u, app_term arity v)}
+
+  (** [app_term_opt arity t] is [app_term] on an optional term. *)
+  and app_term_opt : arity -> p_term option -> p_term option = fun arity t ->
+    match t with
+    | None -> None
+    | Some t -> Some (app_term arity t)
+
+  (** [app_params arity ps] is [app_term] on the types of the binder or
+      symbol arguments [ps]. *)
+  and app_params : arity -> p_params list -> p_params list = fun arity ps ->
+    match ps with
+    | [] -> []
+    | (ids, a, impl) :: ps ->
+        (ids, app_term_opt arity a, impl) :: app_params arity ps
+
+  (** [app_tactic arity t] is [app_term] on the terms of the tactic [t]. *)
+  let rec app_tactic : arity -> p_tactic -> p_tactic = fun arity t ->
+    match t.elt with
+    | P_tac_and (t1, t2) ->
+        {t with elt = P_tac_and (app_tactic arity t1, app_tactic arity t2)}
+    | P_tac_orelse (t1, t2) ->
+        {t with elt = P_tac_orelse (app_tactic arity t1, app_tactic arity t2)}
+    | P_tac_repeat u -> {t with elt = P_tac_repeat (app_tactic arity u)}
+    | P_tac_try u -> {t with elt = P_tac_try (app_tactic arity u)}
+    | P_tac_all_hyps u -> {t with elt = P_tac_all_hyps (app_term arity u)}
+    | P_tac_first_hyp u -> {t with elt = P_tac_first_hyp (app_term arity u)}
+    | P_tac_apply u -> {t with elt = P_tac_apply (app_term arity u)}
+    | P_tac_change u -> {t with elt = P_tac_change (app_term arity u)}
+    | P_tac_eval u -> {t with elt = P_tac_eval (app_term arity u)}
+    | P_tac_refine u -> {t with elt = P_tac_refine (app_term arity u)}
+    | P_tac_have (y, u) -> {t with elt = P_tac_have (y, app_term arity u)}
+    | P_tac_set (y, u) -> {t with elt = P_tac_set (y, app_term arity u)}
+    | P_tac_rewrite (b, p, u) ->
+        {t with elt = P_tac_rewrite (b, p, app_term arity u)}
+    | _ -> t
+
+  (** [app_proof arity p] is [app_term] on the terms of the proof [p], a
+      list of subproofs. A subproof is a list of tactics, each with its own
+      subproofs. *)
+  let app_proof : arity -> p_proof -> p_proof = fun arity p ->
+    let rec proof : p_proof -> p_proof = fun p ->
+      match p with
+      | [] -> []
+      | sp :: p -> subproof sp :: proof p
+    and subproof : p_subproof -> p_subproof = fun sp ->
+      match sp with
+      | [] -> []
+      | Tactic (t, p) :: sp ->
+          Tactic (app_tactic arity t, proof p) :: subproof sp
     in
-    M.for_all same theirs
-  in
-  match theorem_name tr with
-  | None -> fatal_no_pos "The translation has no theorem."
-  | Some th ->
-      {translation = tr; file; same_builtins; theorem = Sign.find sign th}
+    proof p
 
-(** {1 Report (display only)}
-
-    Nothing here changes what is translated, checked or parsed: it only
-    reads the files and the messages left by the steps above, and prints
-    them. *)
-
-module Report = struct
-
-  (** [first_line s] is the first non-empty line of [s], if any. *)
-  let first_line : string -> string option = fun s ->
-    List.find_opt (fun l -> l <> "")
-      (List.map String.trim (String.split_on_char '\n' s))
-
-  (** [or_none m] is the message [m], or that there is none. *)
-  let or_none : string option -> string =
-    Option.value ~default:"no error message"
-
-  (** [carcara_error dir] is the first line of the messages of the last run
-      of Carcara in [dir] (see [translate]), if any. *)
-  let carcara_error : string -> string option = fun dir ->
-    first_line (read (Filename.concat dir "carcara.err"))
-
-  (** [translated pos file mode] prints that the Lambdapi [file] was produced
-      by Carcara in [mode]. *)
-  let translated : Pos.popt -> string -> string -> unit = fun pos file mode ->
-    Console.out 1 "%a Carcara: translated (%s), in %s" Pos.pp pos mode file
-
-  (** [replace sub by s] is [s] where the occurrences of [sub] are replaced
-      by [by]. *)
-  let replace : string -> string -> string -> string = fun sub by s ->
-    let n = String.length sub and b = Buffer.create (String.length s) in
-    let rec go i =
-      if i >= String.length s then Buffer.contents b
-      else if n > 0 && i + n <= String.length s && String.sub s i n = sub
-      then (Buffer.add_string b by; go (i + n))
-      else (Buffer.add_char b s.[i]; go (i + 1))
+  (** [intro pos params p] is the proof [p] starting with the tactic
+      [assume x₁ … xₖ], at the position [pos]: a proof script does not
+      introduce the arguments of its symbol. *)
+  let intro : Pos.popt -> params -> p_proof -> p_proof = fun pos params p ->
+    let rec idents : params -> p_ident option list = fun params ->
+      match params with
+      | [] -> []
+      | (x, _) :: params -> Some x :: idents params
     in
-    go 0
+    match params with
+    | [] -> p
+    | _ ->
+        let assume = Tactic (Pos.make pos (P_tac_assume (idents params)), []) in
+        match p with
+        | [] -> [[assume]]
+        | sp :: p -> (assume :: sp) :: p
 
-  (** [script pos r ~assumed ~constants ~premises ~statement ~goal] prints,
-      as Lambdapi code that can replace the call to the why3 tactic, what
-      the tactic does with the loaded
-      translation [r]. First, the translation. It can be put in the
-      current file only if the file has the builtins of Carcara's library,
-      which the tactics of the translation rely on: otherwise, only that is
-      printed. Then the proof: after the hypotheses
-      [assumed], a hole (admitted) for each of the [constants] that no
-      variable of the goal stands for, for each of the [premises] and from
-      the [statement] of the theorem to the [goal], and the theorem applied
-      to the constants and the premises. A constant is given with its
-      type, its value, and whether that value is a hole. *)
-  let script :
-    Pos.popt -> reconstruction -> assumed:string list
-    -> constants:(string * Term.term * Term.term * bool) list
-    -> premises:Term.term list -> statement:Term.term -> goal:Term.term
-    -> unit =
-    fun pos r ~assumed ~constants ~premises ~statement ~goal ->
-    let str pp x = Format.asprintf "%a" pp x in
-    let valid i x =
-      if String.starts_with ~prefix:"_" x then Printf.sprintf "h%d" i else x
+  (** [lift_symbol arity params ps] adds [params] in front of the arguments
+      of the symbol [ps], introduces them at the start of its proof, and
+      applies the symbols of [arity] to their parameters. *)
+  let lift_symbol : arity -> params -> p_symbol -> p_symbol =
+    fun arity params ps ->
+    let rec args : params -> p_params list = fun params ->
+      match params with
+      | [] -> []
+      | (x, a) :: params -> ([Some x], Some a, false) :: args params
     in
-    let assumed = List.mapi valid assumed in
-    (* A constant that is a hole is named after the constant. *)
-    let hole_name x = x ^ "'" in
-    let constant (x, _, v, hole) =
-      if hole then hole_name x else str Print.term v
+    let proof =
+      match ps.p_sym_prf with
+      | None -> None
+      | Some (p, e) ->
+          Some (intro ps.p_sym_nam.pos params (app_proof arity p), e)
     in
-    let term t =
-      let s = str Print.term t in
-      (* In the current file, the symbols of the translation are not
-         qualified. *)
-      let s = replace (str Path.pp r.theorem.sym_path ^ ".") "" s in
-      let hole s (x, _, v, hole) =
-        if hole then replace (str Print.term v) (hole_name x) s else s
-      in
-      List.fold_left hole s constants
-    in
-    let names = List.map (fun s -> s.p_sym_nam.elt) r.translation.premises in
-    let have ppf (x, a) =
-      Format.fprintf ppf "  have %s : %s { admit };@," x (term a)
-    in
-    let holes = List.filter (fun (_, _, _, hole) -> hole) constants in
-    let hole ppf (x, a, _, _) = have ppf (hole_name x, a) in
-    let assume ppf = function
-      | [] -> ()
-      | xs -> Format.fprintf ppf "  assume %s;@," (String.concat " " xs)
-    in
-    let list pp = Format.pp_print_list ~pp_sep:(fun _ () -> ()) pp in
-    let holes_nb = List.length holes + List.length names + 1 in
-    if r.same_builtins then
-      Console.out 1
-        "@[<v>%a Carcara: reconstruction with %d holes. To replace the \
-         why3 tactic, put before the symbol:@,@,%s@,and replace the tactic \
-         by:@,@,%a%a%a  have goal : (%s) → %s { admit };@,  \
-         refine goal (%s);@]"
-        Pos.pp pos holes_nb (read r.file)
-        assume assumed (list hole) holes
-        (list have) (List.combine names premises)
-        (term statement) (term goal)
-        (String.concat " "
-           (r.theorem.sym_name :: List.map constant constants @ names))
-    else
-      Console.out 1
-        "%a Carcara: reconstruction with %d holes. Its code cannot be \
-         placed in this file, which does not use the encoding of Carcara's \
-         library (the builtins are other symbols, so the tactics of the \
-         translation would fail, and %d constants have no counterpart). To \
-         get code to place here, state the goal with the Stdlib: require \
-         open Stdlib.Set Stdlib.Prop Stdlib.FOL; (after the require of \
-         alethe). The translation is in %s"
-        Pos.pp pos holes_nb (List.length holes) r.file
+    { ps with
+      p_sym_arg = args params @ app_params arity ps.p_sym_arg
+    ; p_sym_typ = app_term_opt arity ps.p_sym_typ
+    ; p_sym_trm = app_term_opt arity ps.p_sym_trm
+    ; p_sym_prf = proof }
 
-  (** [not_loaded pos msg] prints that the translation cannot be loaded. *)
-  let not_loaded : Pos.popt -> string -> unit = fun pos msg ->
-    wrn pos "Carcara: the translation cannot be loaded: %s" msg
-
-  (** [summary pos tr] prints the theorem of the translation [tr] and its
-      premises. *)
-  let summary : Pos.popt -> translation -> unit = fun pos tr ->
-    let decl ppf s =
-      Format.fprintf ppf "%s : %a" s.p_sym_nam.elt Pretty.term (statement s)
+  (** [lift_commands names rev_params arity cmds] lifts the commands [cmds],
+      where [rev_params] are the parameters so far, last one first, and
+      [arity] the symbols lifted so far. *)
+  let rec lift_commands :
+    Term.term StrMap.t -> params -> arity -> p_command list -> p_command list
+    = fun names rev_params arity cmds ->
+    let rec names_of : params -> string list = fun params ->
+      match params with
+      | [] -> []
+      | (x, _) :: params -> x.elt :: names_of params
     in
-    let steps = List.length tr.lemmas - Option.fold ~none:0 ~some:(fun _ -> 1)
-                                           tr.theorem in
-    match tr.theorem with
-    | None -> wrn pos "Carcara: the translation has no theorem."
-    | Some th ->
-        let premises ppf = function
-          | [] -> Format.fprintf ppf "without premises"
-          | l ->
-              Format.fprintf ppf "from the premises@,%a"
-                (Format.pp_print_list
-                   (fun ppf -> Format.fprintf ppf "  %a" decl)) l
-        in
-        Console.out 1
-          "@[<v>%a Carcara: the translation proves@,  %a@,%a@,\
-           (%d constants, %d definitions, %d proof steps)@]"
-          Pos.pp pos decl th premises tr.premises
-          (List.length tr.constants) (List.length tr.definitions) steps
-
-  (** [file f] prints the content of the file [f]. *)
-  let file : string -> unit = fun f -> Console.out 1 "%s" (read f)
-
-  (** [no_translation pos dir reason] prints that Carcara gave no translation
-      in [dir], with the messages of its last run, or [reason]. *)
-  let no_translation : Pos.popt -> string -> string option -> unit =
-    fun pos dir reason ->
-    let msg =
-      match carcara_error dir, reason with
-      | Some m, _ | None, Some m -> m
-      | None, None -> or_none None
+    let is_global : string -> bool = fun x ->
+      match StrMap.find_opt x names with
+      | Some (Term.Symb _) -> true
+      | _ -> false
     in
-    wrn pos "Carcara: no translation (files in %s): %s" dir msg
+    match cmds with
+    | [] -> []
+    | {elt = P_symbol {p_sym_nam = x; _}; _} :: cmds when is_global x.elt ->
+        (* A symbol of the goal: not declared and not lifted, the later
+           commands refer to the symbol itself. This assumes that the file
+           is in the encoding of Carcara's library (the Stdlib), and that
+           the symbol is in scope under this name. *)
+        lift_commands names rev_params arity cmds
+    | {elt = P_symbol {p_sym_nam = x; p_sym_typ = Some a; _}; _} :: cmds
+      when StrMap.mem x.elt names ->
+        (* A variable of the goal: not declared, a parameter from now on. Its
+           type may use the symbols lifted so far. *)
+        lift_commands names ((x, app_term arity a) :: rev_params) arity cmds
+    | ({elt = P_symbol ps; _} as cmd) :: cmds ->
+        let params = List.rev rev_params in
+        let cmd = {cmd with elt = P_symbol (lift_symbol arity params ps)} in
+        (* [ps] is added to [arity] after it is lifted: it does not refer
+           to itself. *)
+        let arity = StrMap.add ps.p_sym_nam.elt (names_of params) arity in
+        cmd :: lift_commands names rev_params arity cmds
+    | cmd :: cmds -> cmd :: lift_commands names rev_params arity cmds
 
+  (** [lift names cmds] lifts the symbols of [cmds] whose name is in
+      [names]. *)
+  let lift : Term.term StrMap.t -> p_command list -> p_command list =
+    fun names cmds -> lift_commands names [] StrMap.empty cmds
 end
 
-(** {1 Reconstruction} *)
+(** [handle_onfly_commands names cmds ss] handles the commands [cmds] in
+    the state [ss]. A symbol whose name is in [names] (see [names]) stands
+    for a term of the goal: it is skipped instead of declared. *)
+let rec handle_onfly_commands :
+  Term.term Extra.StrMap.t -> Parsing.Syntax.p_commands -> Sig_state.t
+  -> Sig_state.t =
+  fun names cmds ss ->
+    match Stream.next cmds with
+    | exception Stream.Failure -> ss
+    | {elt=P_symbol ps; _} when Extra.StrMap.mem ps.p_sym_nam.elt names ->
+        handle_onfly_commands names cmds ss
+    | {elt=P_symbol ps; pos} when Sign.mem ss.signature ps.p_sym_nam.elt ->
+        (* A symbol of Carcara (e.g. a step [t0] or a definition [p_1])
+           with the name of a symbol of the current module: it does not
+           stand for a term of the goal, and cannot be declared. *)
+        fatal pos "Lambdapi's symbol %s clashes with a symbol of the module."
+          ps.p_sym_nam.elt
+    | {elt=P_require _ | P_symbol _; _} as cmd ->
+        (* Compile the command (for a definition, its right side) and add
+           it to [ss]. *)
+        handle_onfly_commands names cmds (Stdlib.(!handle) ss cmd)
+    | {pos; _} ->
+        fatal pos "Command not produced by Carcara's Lambdapi backend."
 
-(** [output ss pos ~problem ~output] translates with Carcara the Alethe
-    proof printed by the prover in [output] for the SMT-LIB [problem] (see
-    [translate]), parses the Lambdapi file obtained (see [parse]) and loads
-    it in the current process (see [load]). It fails if the current file
-    does not require the modules of Carcara's library that the translation
-    uses (see [missing]). Carcara reads the output of the
-    prover as it is (["unsat"], then the proof in parentheses). The
-    translation is first tried strictly, then with "--admit-unsupported".
-    The files are kept in a fresh temporary directory. The steps are
-    printed when debugging (see [Report]). The result is [None] if there is
-    no translation, or if it cannot be loaded. *)
-let output :
-  Sig_state.t -> Pos.popt -> problem:string -> output:string
-  -> reconstruction option =
-  fun ss pos ~problem ~output ->
-  let dir = Filename.temp_dir "lambdapi_carcara_" "" in
-  let file f = Filename.concat dir f in
-  write (file "problem.smt2") problem;
-  write (file "proof.alethe") output;
-  let proof = file "proof.lp" in
-  let after_translation mode =
+(** [inject names ss cmds] handles the commands [cmds] one after the other,
+    starting in the state [ss], and returns the final state. If a command
+    fails, what was added before it is undone, and the result is [None],
+    with a warning. *)
+let inject :
+  Term.term Extra.StrMap.t -> Sig_state.t -> Parsing.Syntax.p_commands
+  -> Sig_state.t option =
+  fun names ss cmds ->
+  let time = Timed.Time.save () in
+  try
+    let rec to_list cmds =
+      match Stream.next cmds with
+      | cmd -> cmd :: to_list cmds
+      | exception Stream.Failure -> []
+    in
+    let cmds = Lift.lift names (to_list cmds) in
     if Logger.log_enabled() then
-      (Report.translated pos proof mode; Report.file proof);
-    let time = Timed.Time.save () in
-    match parse proof with
-    | exception Fatal(_, msg, _) -> Report.not_loaded pos msg; None
-    | tr ->
-        if Logger.log_enabled() then Report.summary pos tr;
-        (* Carcara's library is not loaded behind the back of the user. *)
-        begin match missing ss tr with
-        | [] -> ()
-        | ps ->
-            fatal pos "The reconstruction of this proof uses Carcara's \
-                       library. Add to the file: require %s;"
-              (String.concat " " (List.map (Format.asprintf "%a" Path.pp) ps))
-        end;
-        match load ss dir tr with
-        | r -> Some r
-        | exception Fatal(_, msg, _) ->
-            Timed.Time.restore time; Report.not_loaded pos msg; None
+      List.iter (log "lifted: %a" Parsing.Pretty.command) cmds;
+    let cmds = Stream.of_list cmds in
+    let ss = handle_onfly_commands names cmds ss in
+    Console.out 1 (Color.blu "checked with sucess");
+    Some ss
+  with Fatal(_, msg, _) ->
+    Timed.Time.restore time;
+    Console.out 1 "Carcara: the translation cannot be checked: %s"
+      msg;
+    None
+
+(** [output ss pos ~goal ~problem ~output] translates with Carcara the Alethe proof
+    printed by the prover in [output] for the SMT-LIB [problem], and returns
+    the stream of the commands of the Lambdapi file obtained. The
+    translation is first tried strictly, then with "--admit-unsupported".
+    The files are kept in a fresh temporary directory, which is logged. The
+    result is [None], with a warning, if Carcara gives no translation or if
+    its file cannot be opened. The stream is parsed lazily: a syntax error
+    is raised when the stream is consumed. *)
+let output :
+  Sig_state.t -> Pos.popt -> goal:goal -> problem:string -> output:string
+  -> Parsing.Syntax.p_commands option =
+  fun ss pos ~goal ~problem ~output ->
+  begin
+    (* [Print.ctxt] prints the types only with [print_domains]. *)
+    let hyp ppf (n, (_, a, _)) = Format.fprintf ppf "%s : %a" n Print.term a in
+    log "goal: %a ⊢ %a" (List.pp hyp ", ") (List.rev goal.hyps)
+      Print.term goal.target;
+    let name ppf (n, t) = Format.fprintf ppf "%s ↦ %a" n Print.term t in
+    log "names: %a" (List.pp name ", ")
+      (Extra.StrMap.bindings (names goal))
+  end;
+  (* The files of this call, in a fresh temporary directory. *)
+  let dir = Filename.temp_file "lambdapi_carcara_" "" in
+  Sys.remove dir; Sys.mkdir dir 0o700;
+  let file f = Filename.concat dir f in
+  let write f s = Out_channel.with_open_bin (file f) (fun oc -> output_string oc s) in
+  let read f =
+    try In_channel.with_open_bin (file f) In_channel.input_all
+    with Sys_error _ -> ""
   in
-  if translate dir [] then after_translation "strict"
+  write "problem.smt2" problem;
+  (* Carcara reads the output of the prover from its answer on: the output
+     may start with other messages, e.g. warnings of the dynamic linker. *)
+  let rec from_unsat = function
+    | l :: ls when String.trim l <> "unsat" -> from_unsat ls
+    | ls -> ls
+  in
+  write "proof.alethe"
+    (match from_unsat (String.split_on_char '\n' output) with
+     | [] -> output
+     | ls -> String.concat "\n" ls);
+  (* [translate extra] runs Carcara with the options [extra], writing the
+     translation in proof.lp and its messages in carcara.err. *)
+  let translate extra =
+    let args =
+      ["translate"; "lambdapi"; file "proof.alethe"; file "problem.smt2"]
+      @ options @ extra
+    in
+    let cmd =
+      Filename.quote_command !command args
+        ~stdout:(file "proof.lp") ~stderr:(file "carcara.err")
+    in
+    if Logger.log_enabled() then log "%s" cmd;
+    Sys.command cmd = 0
+  in
+  (* The first line of the messages of the last run of Carcara, if any. *)
+  let carcara_error () =
+    List.find_opt (fun l -> l <> "")
+      (List.map String.trim (String.split_on_char '\n' (read "carcara.err")))
+  in
+  let parse mode =
+    if Logger.log_enabled() then
+      log "%a translated (%s) in %s" Pos.pp pos mode dir;
+    try 
+      let ast = (Parsing.Parser.parse_file (file "proof.lp")) in
+      ignore (inject (names goal) ss ast);
+      Some(ast)
+    with Fatal(_, msg, _) ->
+      wrn pos "Carcara: the translation does not parse: %s" msg; None
+  in
+  let no_message = Option.value ~default:"no error message" in
+  if translate [] then parse "strict"
   else
-    let reason = Report.carcara_error dir in
-    if translate dir ["--admit-unsupported"] then
-      after_translation
-        ("--admit-unsupported, strict failed: " ^ Report.or_none reason)
-    else (Report.no_translation pos dir reason; None)
+    let reason = carcara_error () in
+    if translate ["--admit-unsupported"] then
+      parse ("--admit-unsupported, strict failed: " ^ no_message reason)
+    else
+      let msg =
+        match carcara_error () with Some m -> m | None -> no_message reason
+      in
+      wrn pos "Carcara: no translation (files in %s): %s" dir msg; None

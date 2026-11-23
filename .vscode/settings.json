@@ -1,9 +1,16 @@
 {
-    "lambdapi.path": "/Users/caotic/Desktop/Workspace/lambdapi/_build/install/default/bin/lambdapi",
+    "ocaml.sandbox": {
+        "kind": "opam",
+        "switch": "/home/caotic/Workspace/lambdapi"
+    },
+    "lambdapi.path": "/home/caotic/Workspace/lambdapi/_build/install/default/bin/lambdapi",
     "lambdapi.args": [
         "lsp",
+        "--no-colors",
+        "--map-dir=Stdlib:/home/caotic/Workspace/lambdapi-stdlib",
+        "--map-dir=alethe:/home/caotic/Workspace/carcara-lambdapi/alethe-lp",
         "--experimental-smt-proofs",
         "--carcara",
-        "/Users/caotic/Desktop/Workspace/carcara-lambdapi/target/release/carcara"
+        "/home/caotic/Workspace/carcara-lambdapi/target/release/carcara"
     ]
 }

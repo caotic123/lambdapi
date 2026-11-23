@@ -916,6 +916,7 @@ let cmd_lsp =
             ; summary
             ; desc = summary
             ; options = opt_standard_lsp::opt_log_file
+                        ::opt_lib_root::opt_map_dir
                         ::opt_experimental_smt_proofs::opt_carcara
                         ::general_options } in
   fun args ->

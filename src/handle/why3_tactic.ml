@@ -26,14 +26,6 @@ type config =
   ; symb_ex  : sym (** Exists(∃) symbol. *)
   ; symb_all : sym (** Forall(∀) symbol. *) }
 
-(** Result of a prover call. *)
-type output_solver =
-  | Proof of { problem : string; output : string }
-  (** Valid, with a proof: [problem] is the SMT-LIB problem sent to the
-      prover, and [output] is what the prover printed ("unsat" and an
-      Alethe proof for CVC5). *)
-  | Invalid of string (** No proof found, by the prover of that name. *)
-  | Holey (** Valid, but no proof was asked for. *)
 
 (** [get_config ss pos] build the configuration using [ss]. *)
 let get_config : Sig_state.t -> Pos.popt -> config = fun ss pos ->
@@ -115,6 +107,19 @@ type l2y =
   ; v2vs : (var * Why3.Term.vsymbol) list
   (* Mapping of object variables. *)
   }
+
+(** Result of a prover call. *)
+type output_solver =
+  | Proof of
+      { problem : string; output : string
+      ; l2y : l2y; hyps : (string * Why3.Term.term) list }
+  (** Valid, with a proof: [problem] is the SMT-LIB problem sent to the
+      prover, and [output] is what the prover printed ("unsat" and an
+      Alethe proof for CVC5). [l2y] maps the symbols and variables of the
+      goal to Why3, and [hyps] are the translated hypotheses, with their
+      names, in the order of the task. *)
+  | Invalid of string (** No proof found, by the prover of that name. *)
+  | Holey (** Valid, but no proof was asked for. *)
 
 let empty_l2y =
   {s2ts=[]; v2tv=[]; t2ts=[]; s2ls=[]; v2ls=[]; v2vs=[]; t2ls=[]}
@@ -362,9 +367,11 @@ let rec translate_prop : config -> l2y -> term -> l2y * Why3.Term.term =
   | _ -> default m t
 
 (** [translate_goal ss pos env g] translates the hypotheses [env] and the goal
-    [g] into a Why3 task. *)
+    [g] into a Why3 task. It also returns the map of the translation and the
+    translated hypotheses, with their names. *)
 let translate_goal :
-      Sig_state.t -> Pos.popt -> Env.env -> term -> Why3.Task.task =
+      Sig_state.t -> Pos.popt -> Env.env -> term
+      -> Why3.Task.task * l2y * (string * Why3.Term.term) list =
   fun ss pos env g ->
   let cfg = get_config ss pos in
   (* Translate environment. *)
@@ -438,12 +445,14 @@ let translate_goal :
   let goal = Why3.Decl.create_prsymbol (Why3.Ident.id_fresh "G") in
   let tsk = Why3.Task.add_prop_decl tsk Why3.Decl.Pgoal goal g in
   if Logger.log_enabled() then log "%a" Why3.Pretty.print_task tsk;
-  tsk
+  tsk, m, hyps
 
 (** [run tsk pos prover_name] sends [tsk] to [prover_name]. If [!smt_proofs]
     holds and the prover is CVC5, the prover is also asked for a proof. *)
-let run : Why3.Task.task -> Pos.popt -> string -> output_solver =
-  fun tsk pos prover_name ->
+let run :
+  Why3.Task.task -> l2y -> (string * Why3.Term.term) list -> Pos.popt
+  -> string -> output_solver =
+  fun tsk l2y hyps pos prover_name ->
   (* Filter the set of why3 provers. *)
   let filter = Why3.Whyconf.parse_filter_prover prover_name in
   let provers = Why3.Whyconf.filter_provers why3_config filter in
@@ -493,7 +502,7 @@ let run : Why3.Task.task -> Pos.popt -> string -> output_solver =
     (* The problem as the driver printed it for the prover: a proof checker
        needs it next to the proof. *)
     let problem = Format.asprintf "%a" (Why3.Driver.print_task driver) tsk in
-    Proof {problem; output = res.pr_output}
+    Proof {problem; output = res.pr_output; l2y; hyps}
 
 (** [handle ss pos prover_name gt] runs the Why3 prover corresponding to
     [prover_name] (if given or a default one otherwise) on the goal type
@@ -505,9 +514,9 @@ let handle :
   let g = Typ gt in
   if Logger.log_enabled() then log "%a" Goal.pp g;
   (* Encode the goal in Why3. *)
-  let tsk = translate_goal ss pos hyps t in
+  let tsk, l2y, why3_hyps = translate_goal ss pos hyps t in
   (* Get the name of the prover. *)
   let prover_name = Option.get !default_prover prover_name in
   if Logger.log_enabled() then log "running with prover \"%s\"" prover_name;
   (* Run the task with the prover named [prover_name]. *)
-  run tsk pos prover_name
+  run tsk l2y why3_hyps pos prover_name

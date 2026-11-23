@@ -124,13 +124,8 @@ let rec compile : Command.compiler = fun ss mp ->
       end
     end
 
-(* The reconstruction of SMT proofs loads modules from a tactic. *)
-let () =
-  let require ss mp =
-    let cmd = Syntax.P_require(None, [Pos.none mp]) in
-    Command.handle compile ss (Pos.none cmd)
-  in
-  Stdlib.(Reconstruction.require := require)
+(* The reconstruction of SMT proofs handles commands from a tactic. *)
+let () = Stdlib.(Reconstruction.handle := Command.handle compile)
 
 (** [compile_file fname] looks for a package configuration file for [fname]
     and compiles [fname]. *)
